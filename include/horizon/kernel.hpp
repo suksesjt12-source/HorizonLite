@@ -354,7 +354,8 @@ private:
     std::vector<std::weak_ptr<KAudioOut>> audio_sessions_;
     std::unordered_map<std::int32_t, std::string> nv_devices_;
     std::unordered_map<std::uint32_t, NvMapBuffer> nvmap_buffers_;
-    std::shared_ptr<KDisplayLayer> display_layer_;\n    std::filesystem::path save_data_root_{"save_data"};
+    std::shared_ptr<KDisplayLayer> display_layer_;
+    std::filesystem::path save_data_root_{"save_data"};
     std::int32_t next_nv_fd_{3};
     std::uint32_t next_nvmap_handle_{1U};
     std::uint32_t next_nvmap_id_{1U};
