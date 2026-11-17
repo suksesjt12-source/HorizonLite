@@ -12,7 +12,7 @@
 int main() {
     try {
         horizon::AddressSpace memory;
-        const std::array<std::uint32_t, 31> program{
+        const std::array<std::uint32_t, 33> program{
             0xD2800001U, // MOVZ X1, #0
             0xF2A00041U, // MOVK X1, #2, LSL #16 -> 0x20000
             0xD2800080U, // MOVZ X0, #4
