@@ -1221,7 +1221,17 @@ void verify_self_test(const horizon::AddressSpace& memory,
         throw std::runtime_error(
             "vi:m QueueBuffer did not present the moving RomFS sprite from the worker thread");
     }
-    std::cout << "vi:m + nvdrv/nvmap + Binder QueueBuffer + worker-thread motion self-test passed\n"
+    std::uint32_t saved_x = 0U;
+    std::uint32_t saved_y = 0U;
+    {
+        std::ifstream input(save_path, std::ios::binary);
+        input.read(reinterpret_cast<char*>(&saved_x), sizeof(saved_x));
+        input.read(reinterpret_cast<char*>(&saved_y), sizeof(saved_y));
+        if (!input)
+            throw std::runtime_error("saved sprite coordinates could not be read back");
+    }
+    std::cout << "Account + set:sys + fsp-srv persistent save-data self-test passed\n"
+              << "  Saved sprite: (" << saved_x << ", " << saved_y << ")"
               << "  Worker position: " << worker_position
               << "  Frames: " << frame_number << '\n';
 }
