@@ -37,10 +37,10 @@ int main() {
         if (encoded.size() != entries.size() * sizeof(horizon::LoaderConfigEntry))
             throw std::runtime_error("LoaderConfig byte encoding has an invalid size");
 
-        std::cout << "libnx LoaderConfig layout and values test passed\\n";
+        std::cout << "libnx LoaderConfig layout and values test passed\n";
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "LoaderConfig test failed: " << error.what() << '\\n';
+        std::cerr << "LoaderConfig test failed: " << error.what() << '\n';
         return 1;
     }
 }
