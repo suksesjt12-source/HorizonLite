@@ -13,6 +13,8 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <queue>
+#include <set>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -21,6 +23,11 @@
 namespace horizon {
 
 using Handle = std::uint32_t;
+
+[[nodiscard]] constexpr std::uint32_t MakeResult(
+    std::uint32_t module, std::uint32_t description) noexcept {
+    return (module & 0x1FFU) | ((description & 0x1FFFU) << 9U);
+}
 
 enum class KernelObjectKind : std::uint8_t {
     Port,
@@ -249,6 +256,13 @@ public:
                   SdlAudioOutput& audio);
 
     void svc_set_heap_size(CpuState& state);
+    void prepare_loader_heap(std::uint64_t capacity);
+    [[nodiscard]] std::uint64_t loader_heap_base() const noexcept;
+    [[nodiscard]] std::uint64_t loader_heap_size() const noexcept;
+    void update_main_thread_context(const CpuState& state);
+    void request_applet_exit() noexcept;
+    [[nodiscard]] bool validate_stage9_services();
+    void print_ipc_statistics() const;
     void svc_exit_process(CpuState& state) noexcept;
     void svc_break(CpuState& state);
     void svc_output_debug_string(CpuState& state);
@@ -301,6 +315,10 @@ private:
         const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_settings(
         const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_applet_service(
+        const std::string& service_name, const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_time_service(
+        const std::string& service_name, const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_file_system(
         const std::shared_ptr<KFileSystem>& file_system,
         const CmifRequest& request);
@@ -357,6 +375,11 @@ private:
     std::unordered_map<std::int32_t, std::string> nv_devices_;
     std::unordered_map<std::uint32_t, NvMapBuffer> nvmap_buffers_;
     std::shared_ptr<KDisplayLayer> display_layer_;
+    std::shared_ptr<KEvent> applet_event_;
+    std::queue<std::uint32_t> applet_messages_;
+    std::unordered_map<std::string, std::vector<std::uint32_t>> ipc_accessed_;
+    std::chrono::steady_clock::time_point steady_clock_origin_{
+        std::chrono::steady_clock::now()};
     std::filesystem::path save_data_root_{"save_data"};
     std::int32_t next_nv_fd_{3};
     std::uint32_t next_nvmap_handle_{1U};
@@ -371,6 +394,7 @@ private:
     bool scheduler_yield_requested_{};
     std::uint64_t sampling_number_{};
     std::uint64_t heap_size_{};
+    std::uint64_t heap_capacity_{};
     bool running_{true};
 };
 
