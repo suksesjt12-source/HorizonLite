@@ -396,11 +396,18 @@ CmifResponse HorizonKernel::dispatch_storage(
             return response;
         }
         try {
+            std::cerr << "[IStorage] Read offset=0x" << std::hex << offset
+                      << " size=0x" << size << " receive=0x" << destination.address
+                      << " capacity=0x" << destination.size << std::dec << '\\n';
             const auto first = storage.romfs().begin() +
                 static_cast<std::ptrdiff_t>(offset);
             const auto last = first + static_cast<std::ptrdiff_t>(size);
             std::vector<std::uint8_t> bytes(first, last);
             memory_.write(destination.address, bytes);
+            std::cerr << "[IStorage] copied first words 0x" << std::hex
+                      << memory_.read_u32(destination.address) << " 0x"
+                      << memory_.read_u32(destination.address + 68U)
+                      << std::dec << '\\n';
         } catch (const std::exception&) {
             response.result = kInvalidArgument;
         }
