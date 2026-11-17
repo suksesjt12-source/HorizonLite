@@ -1,86 +1,78 @@
-# HorizonLite — Stage 4: NRO RomFS + fsp-srv storage
+# HorizonLite — Stage 5: audout:u + SDL2 PCM audio
 
-HorizonLite is an educational C++20 HLE research prototype for a limited subset of AArch64 execution, Horizon-style SVCs, HIPC/CMIF service dispatch, HID shared memory, the NRO ASET asset section, a subset of Switch RomFS, and an SDL2 linear framebuffer.
+HorizonLite is an educational C++20 HLE research prototype for limited AArch64 execution, Horizon-style SVCs, HIPC/CMIF service dispatch, HID shared memory, NRO ASET/RomFS, an SDL2 framebuffer and queued PCM audio.
 
-It is **not a complete Nintendo Switch emulator**. It does not implement the full Horizon kernel, all AArch64 instructions, GPU command processing, complete filesystem services, NSP/XCI loading, NCA decryption, process metadata, or commercial-game compatibility. The IPC framing, NRO boot setup, and service behavior are intentionally bounded to the built-in guest demonstration and should not be treated as full retail ABI compatibility.
+It is **not a complete Nintendo Switch emulator**. It does not implement the full Horizon kernel, all AArch64 instructions, the complete retail audio ABI, GPU command processing, NSP/XCI loading, NCA decryption, or commercial-game compatibility. The HIPC descriptors and HLE services are a bounded subset for the built-in guest demo and test suite.
 
-## Stage 4 features
+## Stage 5 audio output
 
-### NRO ASET and embedded RomFS
+### SDL2 audio device
 
-- Checks for the optional ASET section at file offset `NroHeader.size`.
-- Validates the ASET magic `0x54455341` ("ASET") and version 0.
-- Reads the RomFS asset section's 64-bit offset and size at ASET offsets `0x28` and `0x30`. Asset offsets are relative to the start of the ASET header.
-- Bounds-checks the section against the NRO file and copies the RomFS image into `NroImage::romfs`.
-- The current extractor accepts a direct RomFS image with a 0x50-byte RomFS header. It does not unwrap an IVFC image used by other container formats.
+- SDL audio subsystem initialization is separate from the video subsystem.
+- Opens one SDL2 audio output device at 48,000 Hz, `AUDIO_S16LSB`, signed 16-bit PCM, two channels (stereo).
+- Uses `SDL_QueueAudio` and `SDL_GetQueuedAudioSize`; no user callback is required.
+- Headless self-test selects SDL's dummy audio backend when `SDL_AUDIODRIVER` is not already configured.
+- `Stop` pauses and clears the queued output; queued guest buffers are moved to the released-buffer list.
 
-The NRO ASET layout is based on the documented optional homebrew assets section in the Switch NRO format. 【turn882866search2】
+### Kernel audio objects and synchronization
 
-### RomFsBuilder
+- `KEvent` is a kernel object with a `signaled` state and can be referenced through a guest handle.
+- `KAudioOut` tracks active buffer headers, cumulative submitted byte offsets, released buffer pointers, and its per-session buffer event.
+- Audio completion is estimated from the change in SDL's queued-byte count. When a buffer's end offset has left SDL's queue, the header pointer is added to the released list and the event is signaled.
+- `svcWaitSynchronization` (`0x18`) checks a guest array of 32-bit handles at X1 with count X2, updates queued-audio progress, and returns the ready index in X1. The bounded fallback signals a valid event rather than trapping the emulated thread forever.
+- `svcResetSignal` (`0x17`) clears the event state for the handle in X0.
 
-- Emits the ten-u64 / 0x50-byte RomFS header.
-- Builds directory hash, directory metadata, file hash, and file metadata tables.
-- Emits a root directory entry and one root-level file entry, with data offset and file size.
-- Places the sample sprite file data at RomFS offset `0x100`.
-- Generates a 16x16 RGBA8888 sample sprite.
+### HLE service `audout:u`
 
-The table fields and metadata entry layouts follow the structures used by libnx's RomFS driver. 【turn500717view0】
+The service manager `sm:` recognizes `audout:u` and returns an `IAudioOutManager` session.
 
-### HIPC / CMIF buffer descriptors
-
-The Stage 3 CMIF codec is extended to parse the HIPC descriptor counts in the command header and extract:
-
-- X descriptors (Pointer Buffer).
-- A descriptors (Send Buffer).
-- B descriptors (Receive Buffer).
-- W descriptors (Send/Receive Exchange Buffer).
-
-The service handler validates descriptor sizes and guest memory ranges before reading from or writing to guest memory. The request raw-data area is read according to the HIPC raw-data word count; CMIF requests use `SFCI` and replies use `SFCO`.
-
-### Filesystem service HLE
-
-The `sm:` service manager now offers `hid` and `fsp-srv`.
-
-| Service | Command | Behavior |
+| Interface | Command | Behavior |
 | --- | ---: | --- |
-| `IFileSystemProxy` | 1 | `SetCurrentProcess`: accepts the process-id payload and returns success |
-| `IFileSystemProxy` | 200 | `OpenDataStorageByCurrentProcess`: returns an `IStorage` Move Handle backed by the active NRO RomFS buffer |
-| `IStorage` | 0 | `Read`: validates raw `offset` and `size`, then writes into the first B (Receive Buffer) descriptor |
-| `IStorage` | 4 | `GetSize`: returns the RomFS byte size as a u64 raw response parameter |
+| `IAudioOutManager` | 0 | `ListAudioOuts`: writes the null-terminated `DeviceOut` name to a Receive Buffer and returns count 1 |
+| `IAudioOutManager` | 1 | `OpenAudioOut`: reads `DeviceOut` from Send/Auto Send and returns a Move Handle plus 48000 Hz, 2 channels, Int16 format 2, state 0 |
+| `IAudioOut` | 0 | `GetAudioOutState`: returns Started (0) or Stopped (1) |
+| `IAudioOut` | 1 / 2 | `Start` / `Stop`: unpauses or pauses SDL audio; Stop also clears queued audio and releases active buffer headers |
+| `IAudioOut` | 3 / 7 | `AppendAudioOutBuffer` / Auto: reads the five-u64 audio buffer header, validates buffer bounds and queues guest S16LE stereo samples |
+| `IAudioOut` | 4 | `RegisterBufferEvent`: returns a Copy Handle to the session's KEvent |
+| `IAudioOut` | 5 / 8 | `GetReleasedAudioOutBuffers` / Auto: writes released header pointers to a Receive/Auto Receive Buffer and returns the count |
 
-The Stage 4 `IStorage` object retains the RomFS bytes loaded for the current NRO. For no-argument self-test, the kernel receives the generated RomFS image instead.
+The guest buffer header is represented by five little-endian u64 fields: `next_ptr`, `sample_buffer_ptr`, `sample_buffer_capacity`, `data_size`, and `data_offset`. The service validates `data_offset + data_size` against capacity and checks that the PCM range is mapped and readable before queuing.
 
-### ARM64 memory
+### Auto IPC buffers
 
-The AArch64 interpreter now supports byte memory operations:
+The reduced HIPC descriptor reader recognizes Auto Send type `0x21` and Auto Receive type `0x22`, in addition to X (Pointer), A (Send), B (Receive), and W (Exchange) buffers. In this prototype, the auto-type value is carried in the low byte of the descriptor attributes word. This is a documented local encoding for the test harness, not a claim that every retail HIPC variant uses this exact encoding.
 
-- `LDRB Wt, [Xn, #imm]`
-- `STRB Wt, [Xn, #imm]`
+### ARM64 additions
 
-Existing 32-bit `LDR Wt` / `STR Wt` and 64-bit `LDR Xt` / `STR Xt` operations remain available. Stage 3 logical, shift, TLS, and branch instructions remain present.
+- `MOVN Wd, #imm16` / `MOVN Xd, #imm16` for inverted immediate values.
+- `STRH Wt, [Xn, #imm]` for 16-bit PCM samples.
+- `EOR` is executed by the existing logical-register decoder and is now covered by the CPU regression test.
 
-## Interactive self-test
+## Self-test: sprite + sound
 
 Run without an NRO path:
 
     ./build/horizonlite
 
-The generated guest ARM64 program performs the service sequence itself:
+The built-in ARM64 guest performs the Stage 3/4 service flows, then:
 
-1. Connects to `sm:`.
-2. Requests the `hid` service and obtains the HID shared memory.
-3. Requests `fsp-srv`.
-4. Calls `SetCurrentProcess` and `OpenDataStorageByCurrentProcess`.
-5. Calls `IStorage::GetSize` and `IStorage::Read` with a B Receive Buffer descriptor to copy the 16x16 RGBA sprite into guest RAM.
-6. Reads HID input and draws the sprite from guest RAM to the 1280x720 framebuffer.
+1. Requests `audout:u` through `sm:`.
+2. Opens `DeviceOut`, registers the buffer KEvent, and starts the audio output.
+3. Fills a guest RAM buffer with 4,800 frames of stereo S16LE square-wave PCM at approximately 440 Hz (about 100 ms).
+4. On an A-button edge, calls `AppendAudioOutBufferAuto` to queue the PCM buffer.
+5. Queries `GetReleasedAudioOutBuffersAuto` while continuing the HID-driven RomFS sprite loop.
 
-Arrow keys or WASD move the sprite. Z=A, X=B, A=X, S=Y, and Enter=Plus. Press Escape or close the SDL2 window to exit.
+SDL2 keyboard mapping: Arrow keys / WASD move the sprite; Z=A, X=B, A=X, S=Y, Enter=Plus. Press Escape or close the window to exit.
 
-Run the guest self-test in CI/headless mode:
+Run the same guest path in CI/headless mode:
 
     ./build/horizonlite --headless
 
-Headless mode runs a bounded instruction budget and checks that the guest has drawn the expected sprite pixel.
+Headless mode uses SDL's dummy audio driver when needed, simulates an A-button press to exercise the append path, waits for the queued 100 ms buffer to complete, and verifies the sprite framebuffer output.
+
+## Earlier stages retained
+
+Stage 5 retains the Stage 3 TLS, CPU logical/branch extensions, handle table, CMIF and `sm:`/HID services, plus Stage 4 NRO ASET extraction, the RomFS builder, `fsp-srv`, `IStorage::Read`, and sprite rendering.
 
 ## Build requirements
 
@@ -96,17 +88,16 @@ Headless mode runs a bounded instruction budget and checks that the guest has dr
     cmake --build build --parallel
     ctest --test-dir build --output-on-failure
 
-### Load an NRO image
+### NRO loading limitation
 
-    ./build/horizonlite path/to/homebrew.nro
-
-The loader accepts only uncompressed NRO files in the current NRO subset. If ASET contains a direct RomFS image, it is exposed to the guest through `fsp-srv` and `IStorage`. The interpreter still supports only a subset of AArch64; ordinary homebrew applications may need additional startup, relocations, exception handling, services, filesystem commands, and graphics interfaces that are not implemented here.
+The loader currently accepts uncompressed NRO images and direct RomFS data in the optional ASET section. The emulator does not yet implement the complete NRO process startup model, every AArch64 instruction, IVFC-wrapped RomFS, full Horizon IPC/session semantics, all audio formats or all libnx service contracts.
 
 ## Project structure
 
     HorizonLite/
     ├── CMakeLists.txt
     ├── include/horizon/
+    │   ├── audio.hpp
     │   ├── cpu.hpp
     │   ├── display.hpp
     │   ├── kernel.hpp
@@ -114,6 +105,7 @@ The loader accepts only uncompressed NRO files in the current NRO subset. If ASE
     │   ├── nro_loader.hpp
     │   └── romfs.hpp
     ├── src/
+    │   ├── audio.cpp
     │   ├── cpu.cpp
     │   ├── display.cpp
     │   ├── kernel.cpp
