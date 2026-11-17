@@ -405,7 +405,7 @@ void Arm64Cpu::step() {
         instruction & 0x3F20FC00U;
     if (exclusive_store_class == 0x08007C00U ||
         exclusive_store_class == 0x0800FC00U) {
-        const bool wide = (instruction >> 30U) != 0U;
+        const bool wide = ((instruction >> 30U) & 1U) != 0U;
         const unsigned status_register = (instruction >> 16U) & 0x1FU;
         const unsigned rn = (instruction >> 5U) & 0x1FU;
         const unsigned rt = instruction & 0x1FU;
