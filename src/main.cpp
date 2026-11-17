@@ -1,3 +1,4 @@
+#include "horizon/audio.hpp"
 #include "horizon/cpu.hpp"
 #include "horizon/display.hpp"
 #include "horizon/kernel.hpp"
@@ -37,6 +38,9 @@ constexpr std::uint64_t kSelfTestTextAddress = 0x00100000ULL;
 constexpr std::uint64_t kSelfTestStringsAddress = 0x00110000ULL;
 constexpr std::uint64_t kHidMappingAddress = 0x20000000ULL;
 constexpr std::uint64_t kSpriteBufferAddress = 0x21000000ULL;
+constexpr std::uint64_t kPcmBufferAddress = 0x22000000ULL;
+constexpr std::uint64_t kAudioBufferHeaderAddress = 0x22010000ULL;
+constexpr std::uint64_t kAudioReleasedArrayAddress = 0x22011000ULL;
 constexpr std::uint64_t kStopAddress = std::numeric_limits<std::uint64_t>::max();
 constexpr std::size_t kInteractiveInstructionBudget = 180000U;
 constexpr std::size_t kHeadlessInstructionLimit = 1000000U;
@@ -55,6 +59,15 @@ public:
     void movz(unsigned rd, std::uint16_t immediate, unsigned shift = 0U) {
         emit(0xD2800000U | ((shift / 16U) << 21U) |
              (static_cast<std::uint32_t>(immediate) << 5U) | rd);
+    }
+
+    void movn_w(unsigned rd, std::uint16_t immediate) {
+        emit(0x12800000U |
+             (static_cast<std::uint32_t>(immediate) << 5U) | rd);
+    }
+
+    void eor_reg(unsigned rd, unsigned rn, unsigned rm) {
+        emit(0xCA000000U | (rm << 16U) | (rn << 5U) | rd);
     }
 
     void movk(unsigned rd, std::uint16_t immediate, unsigned shift = 0U) {
@@ -111,6 +124,10 @@ public:
 
     void str_w(unsigned rt, unsigned rn, unsigned offset) {
         emit(0xB9000000U | ((offset / 4U) << 10U) | (rn << 5U) | rt);
+    }
+
+    void strh(unsigned rt, unsigned rn, unsigned offset) {
+        emit(0x79000000U | ((offset / 2U) << 10U) | (rn << 5U) | rt);
     }
 
     void ldr_w(unsigned rt, unsigned rn, unsigned offset) {
@@ -198,7 +215,9 @@ enum class IpcDescriptorKind {
     None,
     Pointer,
     Send,
-    Receive
+    Receive,
+    AutoSend,
+    AutoReceive
 };
 
 void emit_cmif_request(A64Assembler& a, unsigned command_id,
@@ -211,10 +230,12 @@ void emit_cmif_request(A64Assembler& a, unsigned command_id,
     if (descriptor_kind == IpcDescriptorKind::Pointer) {
         header0 |= 1U << 16U;
         descriptor_bytes = 8U;
-    } else if (descriptor_kind == IpcDescriptorKind::Send) {
+    } else if (descriptor_kind == IpcDescriptorKind::Send ||
+               descriptor_kind == IpcDescriptorKind::AutoSend) {
         header0 |= 1U << 20U;
         descriptor_bytes = 12U;
-    } else if (descriptor_kind == IpcDescriptorKind::Receive) {
+    } else if (descriptor_kind == IpcDescriptorKind::Receive ||
+               descriptor_kind == IpcDescriptorKind::AutoReceive) {
         header0 |= 1U << 24U;
         descriptor_bytes = 12U;
     }
@@ -238,12 +259,17 @@ void emit_cmif_request(A64Assembler& a, unsigned command_id,
         a.mov64(0U, descriptor_address);
         a.str_w(0U, 20U, 12U);
     } else if (descriptor_kind == IpcDescriptorKind::Send ||
-               descriptor_kind == IpcDescriptorKind::Receive) {
+               descriptor_kind == IpcDescriptorKind::Receive ||
+               descriptor_kind == IpcDescriptorKind::AutoSend ||
+               descriptor_kind == IpcDescriptorKind::AutoReceive) {
         a.mov64(0U, static_cast<std::uint32_t>(descriptor_size));
         a.str_w(0U, 20U, 8U);
         a.mov64(0U, static_cast<std::uint32_t>(descriptor_address));
         a.str_w(0U, 20U, 12U);
-        a.movz(0U, 0U);
+        const std::uint32_t descriptor_type =
+            descriptor_kind == IpcDescriptorKind::AutoSend ? 0x21U :
+            descriptor_kind == IpcDescriptorKind::AutoReceive ? 0x22U : 0U;
+        a.movz(0U, static_cast<std::uint16_t>(descriptor_type));
         a.str_w(0U, 20U, 16U);
     }
 
@@ -337,13 +363,70 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.mov_reg(0U, 26U);
     a.svc(0x21U);
 
+    emit_named_service_request(a, kSelfTestStringsAddress + 16U);
+    a.mov_reg(0U, 21U);
+    a.svc(0x21U);
+    a.ldr_w(27U, 20U, 12U);
+
+    emit_cmif_request(a, 1U, IpcDescriptorKind::AutoSend,
+                      kSelfTestStringsAddress + 32U, 16U);
+    a.mov_reg(0U, 27U);
+    a.svc(0x21U);
+    a.ldr_w(28U, 20U, 12U);
+
+    emit_cmif_request(a, 4U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 28U);
+    a.svc(0x21U);
+    a.ldr_w(23U, 20U, 12U);
+
+    emit_cmif_request(a, 1U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 28U);
+    a.svc(0x21U);
+
+    a.mov64(0U, kPcmBufferAddress);
+    a.movz(1U, 4800U);
+    a.movz(2U, 55U);
+    a.movz(3U, 0U);
+    a.movz(4U, 8000U);
+    a.movn_w(5U, 0x1F3FU);
+    a.movz(6U, 1U);
+    a.bind("beep_frame");
+    a.cbz(1U, "beep_done");
+    a.cbz(3U, "beep_positive");
+    a.mov_reg(7U, 5U);
+    a.branch("beep_sample_ready");
+    a.bind("beep_positive");
+    a.mov_reg(7U, 4U);
+    a.bind("beep_sample_ready");
+    a.strh(7U, 0U, 0U);
+    a.strh(7U, 0U, 2U);
+    a.add_imm(0U, 0U, 4U);
+    a.subs_imm(1U, 1U, 1U);
+    a.subs_imm(2U, 2U, 1U);
+    a.cbnz(2U, "beep_frame");
+    a.eor_reg(3U, 3U, 6U);
+    a.movz(2U, 55U);
+    a.branch("beep_frame");
+    a.bind("beep_done");
+
+    a.mov64(0U, kAudioBufferHeaderAddress);
+    a.movz(1U, 0U);
+    a.str_x(1U, 0U, 0U);
+    a.mov64(1U, kPcmBufferAddress);
+    a.str_x(1U, 0U, 8U);
+    a.mov64(1U, 19200U);
+    a.str_x(1U, 0U, 16U);
+    a.str_x(1U, 0U, 24U);
+    a.movz(1U, 0U);
+    a.str_x(1U, 0U, 32U);
+
     a.mov64(15U, kHidMappingAddress + 0x9A28U);
     a.mov64(16U, kSpriteBufferAddress);
     a.mov64(29U, kFramebufferAddress);
     a.movz(19U, 100U);
     a.movz(18U, 100U);
     a.mov64(17U, 0xFF101820U);
-    a.movz(28U, 0U);
+    a.movz(24U, 0U);
 
     a.bind("frame_loop");
     a.mov_reg(0U, 19U);
@@ -371,6 +454,24 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.cbz(1U, "not_down");
     a.add_imm(18U, 18U, 2U);
     a.bind("not_down");
+
+    a.and_imm(1U, 0U, 0U, 0U);
+    a.cbz(1U, "audio_button_released");
+    a.cbnz(24U, "audio_button_done");
+    emit_cmif_request(a, 7U, IpcDescriptorKind::AutoSend,
+                      kAudioBufferHeaderAddress, 0x28U);
+    a.mov_reg(0U, 28U);
+    a.svc(0x21U);
+    a.movz(24U, 1U);
+    a.branch("audio_button_done");
+    a.bind("audio_button_released");
+    a.movz(24U, 0U);
+    a.bind("audio_button_done");
+
+    emit_cmif_request(a, 8U, IpcDescriptorKind::AutoReceive,
+                      kAudioReleasedArrayAddress, 0x20U);
+    a.mov_reg(0U, 28U);
+    a.svc(0x21U);
 
     a.and_imm(19U, 19U, 0U, 10U);
     a.subs_imm(1U, 19U, 1264U);
@@ -492,6 +593,8 @@ void initialize_machine_memory(horizon::AddressSpace& memory) {
                       horizon::Permission::Read | horizon::Permission::Write);
     memory.map_zeroed(kSpriteBufferAddress, 0x1000U,
                       horizon::Permission::Read | horizon::Permission::Write);
+    memory.map_zeroed(kPcmBufferAddress, 0x20000U,
+                      horizon::Permission::Read | horizon::Permission::Write);
 
     std::vector<std::uint8_t> background(kFramebufferBytes, 0U);
     for (std::size_t offset = 0U; offset < background.size(); offset += 4U) {
@@ -515,14 +618,17 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
     const std::vector<std::uint8_t> service_strings{
         'h', 'i', 'd', 0U,
         'f', 's', 'p', '-', 's', 'r', 'v', 0U,
-        's', 'm', ':', 0U
+        's', 'm', ':', 0U,
+        'a', 'u', 'd', 'o', 'u', 't', ':', 'u', 0U,
+        0U, 0U, 0U, 0U, 0U, 0U, 0U,
+        'D', 'e', 'v', 'i', 'c', 'e', 'O', 'u', 't', 0U, 0U, 0U, 0U, 0U, 0U, 0U
     };
     memory.map(kSelfTestTextAddress, std::move(text),
                horizon::Permission::Read | horizon::Permission::Execute);
     memory.map(kSelfTestStringsAddress, service_strings,
                horizon::Permission::Read);
-    std::cout << "HorizonLite Stage 4 self-test: guest connects to sm:, requests hid and fsp-srv, "
-                 "reads sprite.rgba through IStorage::Read, then draws the sprite from guest RAM.\n";
+    std::cout << "HorizonLite Stage 5 self-test: guest connects to sm:, hid, fsp-srv and audout:u, "
+                 "loads the RomFS sprite, and queues a 440 Hz stereo beep when A/Z is pressed.\n";
     return kSelfTestTextAddress;
 }
 
@@ -578,10 +684,12 @@ void verify_self_test(const horizon::AddressSpace& memory) {
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                  const horizon::AddressSpace& memory, bool self_test) {
     if (self_test) {
-        kernel.update_hid_input(0U);
+        kernel.update_hid_input(horizon::HidButtonA);
         const std::size_t executed =
             cpu.run(kHeadlessInstructionLimit, kStopAddress);
         std::cout << "Executed guest instructions: " << executed << '\n';
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        kernel.update_audio_events();
         verify_self_test(memory);
         return 0;
     }
@@ -606,8 +714,10 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         if (!keep_open) break;
 
         kernel.update_hid_input(display.read_controller_buttons());
+        kernel.update_audio_events();
         if (kernel.running())
             (void)cpu.run(kInteractiveInstructionBudget, kStopAddress);
+        kernel.update_audio_events();
         display.render(memory, kFramebufferAddress,
                        kFramebufferWidth, kFramebufferHeight);
         std::this_thread::sleep_until(frame_start + frame_duration);
@@ -623,8 +733,9 @@ int main(int argc, char** argv) {
         horizon::AddressSpace memory;
         initialize_machine_memory(memory);
         LoadedProgram program = load_program(options, memory);
+        horizon::SdlAudioOutput audio(options.headless);
 
-        horizon::HorizonKernel kernel(memory, std::move(program.romfs));
+        horizon::HorizonKernel kernel(memory, std::move(program.romfs), audio);
         horizon::SvcHandler svc_handler(kernel);
         horizon::Arm64Cpu cpu(memory, svc_handler);
         cpu.state().pc = program.entry_point;

@@ -98,6 +98,13 @@ void AddressSpace::write_u8(std::uint64_t address, std::uint8_t value) {
     region.bytes[offset] = value;
 }
 
+void AddressSpace::write_u16(std::uint64_t address, std::uint16_t value) {
+    Region& region = find_region(address, sizeof(value), Permission::Write);
+    const std::size_t offset = static_cast<std::size_t>(address - region.base);
+    region.bytes[offset] = static_cast<std::uint8_t>(value & 0xFFU);
+    region.bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
+}
+
 void AddressSpace::write_u32(std::uint64_t address, std::uint32_t value) {
     Region& region = find_region(address, sizeof(value), Permission::Write);
     const std::size_t offset = static_cast<std::size_t>(address - region.base);
@@ -116,6 +123,13 @@ std::uint8_t AddressSpace::read_u8(std::uint64_t address, Permission access) con
     const Region& region = find_region(address, sizeof(std::uint8_t), access);
     const std::size_t offset = static_cast<std::size_t>(address - region.base);
     return region.bytes[offset];
+}
+
+std::uint16_t AddressSpace::read_u16(std::uint64_t address, Permission access) const {
+    const Region& region = find_region(address, sizeof(std::uint16_t), access);
+    const std::size_t offset = static_cast<std::size_t>(address - region.base);
+    return static_cast<std::uint16_t>(region.bytes[offset]) |
+           static_cast<std::uint16_t>(static_cast<std::uint16_t>(region.bytes[offset + 1U]) << 8U);
 }
 
 std::uint32_t AddressSpace::read_u32(std::uint64_t address, Permission access) const {

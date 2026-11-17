@@ -1,10 +1,12 @@
 #pragma once
 
+#include "horizon/audio.hpp"
 #include "horizon/cpu.hpp"
 #include "horizon/memory.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <span>
@@ -20,7 +22,9 @@ enum class KernelObjectKind : std::uint8_t {
     Port,
     ClientSession,
     SharedMemory,
-    Storage
+    Storage,
+    Event,
+    AudioOut
 };
 
 class KObject {
@@ -62,6 +66,28 @@ private:
     std::shared_ptr<const std::vector<std::uint8_t>> romfs_;
 };
 
+class KEvent final : public KObject {
+public:
+    KEvent() noexcept;
+    bool signaled{};
+};
+
+struct QueuedAudioBuffer {
+    std::uint64_t header_address{};
+    std::uint64_t end_byte{};
+};
+
+class KAudioOut final : public KObject {
+public:
+    explicit KAudioOut(SdlAudioOutput& device);
+    SdlAudioOutput& device;
+    std::shared_ptr<KEvent> buffer_event;
+    std::deque<QueuedAudioBuffer> active_buffers;
+    std::deque<std::uint64_t> released_buffers;
+    std::uint64_t submitted_bytes{};
+    bool started{};
+};
+
 class HandleTable {
 public:
     [[nodiscard]] Handle insert(std::shared_ptr<KObject> object);
@@ -85,6 +111,8 @@ struct CmifRequest {
     std::vector<IpcBufferDescriptor> send_buffers;
     std::vector<IpcBufferDescriptor> receive_buffers;
     std::vector<IpcBufferDescriptor> exchange_buffers;
+    std::vector<IpcBufferDescriptor> auto_send_buffers;
+    std::vector<IpcBufferDescriptor> auto_receive_buffers;
 };
 
 struct CmifResponse {
@@ -117,8 +145,9 @@ enum HidButton : std::uint64_t {
 
 class HorizonKernel {
 public:
-    explicit HorizonKernel(AddressSpace& memory,
-                           std::vector<std::uint8_t> romfs = {});
+    HorizonKernel(AddressSpace& memory,
+                  std::vector<std::uint8_t> romfs,
+                  SdlAudioOutput& audio);
 
     void svc_set_heap_size(CpuState& state);
     void svc_exit_process(CpuState& state) noexcept;
@@ -129,7 +158,10 @@ public:
     void svc_map_shared_memory(CpuState& state);
     void svc_unmap_shared_memory(CpuState& state);
     void svc_close_handle(CpuState& state);
+    void svc_reset_signal(CpuState& state);
+    void svc_wait_synchronization(CpuState& state);
     void update_hid_input(std::uint64_t buttons);
+    void update_audio_events();
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] const HandleTable& handles() const noexcept;
@@ -146,10 +178,21 @@ private:
         const KClientSession& session, const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_storage(
         const KStorage& storage, const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_audio_manager(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_audio_out(
+        const std::shared_ptr<KAudioOut>& audio_out,
+        const CmifRequest& request);
     [[nodiscard]] std::string read_guest_string(
         std::uint64_t address, std::size_t maximum) const;
     [[nodiscard]] std::string read_service_name(
         const CmifRequest& request) const;
+    [[nodiscard]] const IpcBufferDescriptor* find_send_buffer(
+        const CmifRequest& request, bool allow_pointer = true) const noexcept;
+    [[nodiscard]] const IpcBufferDescriptor* find_receive_buffer(
+        const CmifRequest& request) const noexcept;
+    void update_audio_out(const std::shared_ptr<KAudioOut>& audio_out);
+    void release_all_audio_buffers(const std::shared_ptr<KAudioOut>& audio_out);
 
     static constexpr std::uint64_t kHeapBase = 0x50000000ULL;
     static constexpr std::uint64_t kMaximumHeapSize = 0x10000000ULL;
@@ -157,12 +200,15 @@ private:
     static constexpr std::uint64_t kNpadFullEntryOffset = 0x9A20ULL;
     static constexpr std::uint64_t kNpadHandheldEntryOffset = 0x9A50ULL;
     static constexpr std::size_t kHidSharedMemorySize = 0x40000U;
+    static constexpr std::size_t kAudioOutBufferHeaderSize = 0x28U;
 
     AddressSpace& memory_;
     HandleTable handles_;
     std::unordered_map<std::string, std::shared_ptr<KPort>> ports_;
     std::shared_ptr<KSharedMemory> hid_shared_memory_;
     std::shared_ptr<const std::vector<std::uint8_t>> romfs_;
+    SdlAudioOutput& audio_device_;
+    std::vector<std::weak_ptr<KAudioOut>> audio_sessions_;
     std::unordered_map<Handle, SharedMapping> shared_mappings_;
     std::uint64_t sampling_number_{};
     std::uint64_t heap_size_{};
