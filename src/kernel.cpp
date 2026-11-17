@@ -1053,12 +1053,6 @@ CmifResponse HorizonKernel::dispatch_applet_service(
         service_name == "IDisplayController") {
         return response;
     }
-    if (service_name.starts_with("generic_stub:")) {
-        std::cout << "[GenericStubService] " << service_name.substr(13U)
-                  << " command " << request.command_id << " -> success\n";
-        return response;
-    }
-
     response.result = kInvalidCommand;
     return response;
 }
