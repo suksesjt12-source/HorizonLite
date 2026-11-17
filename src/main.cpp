@@ -784,6 +784,9 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.mov64(11U, kSharedThreadDataOffset);
     a.add_reg(10U, 10U, 11U);
     a.str_w(19U, 10U, 4U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(19U, 2U, 0xF0U);
+    a.str_w(18U, 2U, 0xF4U);
 
     emit_named_service_request(a, kSelfTestStringsAddress + 16U);
     a.mov_reg(0U, 19U);
@@ -1204,6 +1207,14 @@ void verify_self_test(const horizon::AddressSpace& memory,
         heap_base + kSharedThreadDataOffset;
     const std::uint32_t worker_position =
         memory.read_u32(shared_data + 4U);
+    const std::filesystem::path save_path =
+        std::filesystem::path("save_data") /
+        "11223344556677880000000000000001" /
+        "0100000000000000" / "pos.bin";
+    if (!std::filesystem::exists(save_path) ||
+        std::filesystem::file_size(save_path) != 8U) {
+        throw std::runtime_error("persistent save-data file was not created with the 8-byte sprite state");
+    }
     if (!sprite_pixel_found || worker_position == 100U) {
         std::cerr << "  Sprite pixel found: " << sprite_pixel_found
                   << "  Worker position: " << worker_position << '\n';
@@ -1217,7 +1228,7 @@ void verify_self_test(const horizon::AddressSpace& memory,
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                  const horizon::AddressSpace& memory, bool self_test) {
     if (self_test) {
-        kernel.update_hid_input(horizon::HidButtonA);
+        kernel.update_hid_input(horizon::HidButtonA | horizon::HidButtonX);
         const std::size_t executed =
             kernel.run_scheduler(cpu, kHeadlessInstructionLimit, kStopAddress);
         std::cout << "Executed guest instructions: " << executed << '\n';
