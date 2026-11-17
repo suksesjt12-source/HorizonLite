@@ -1629,7 +1629,7 @@ void HorizonKernel::svc_create_thread(CpuState& state) {
     const std::int32_t processor_id = static_cast<std::int32_t>(state.x[5]);
     if (!scheduler_initialized_ || entry_pc == 0U ||
         stack_top < 16U || (stack_top & 0xFU) != 0U ||
-        priority < 0 || priority > 0x3FU ||
+        priority < 0 || priority > 0x3F ||
         (processor_id < -1 || processor_id > 3) ||
         next_thread_index_ >= 0x10000U) {
         state.x[0] = kInvalidArgument;
