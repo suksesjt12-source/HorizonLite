@@ -1,0 +1,20 @@
+name: C++ build and smoke test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Create synthetic NRO fixture
+        run: python3 tools/make_test_nro.py
+      - name: Run parser and interpreter smoke test
+        run: ./build/horizonlite test_homebrew.nro --run
