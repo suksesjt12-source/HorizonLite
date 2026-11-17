@@ -164,6 +164,14 @@ const std::string& KClientSession::service_name() const noexcept {
     return service_name_;
 }
 
+GenericStubService::GenericStubService(std::string service_name)
+    : KObject(KernelObjectKind::GenericStubService),
+      service_name_(std::move(service_name)) {}
+
+const std::string& GenericStubService::service_name() const noexcept {
+    return service_name_;
+}
+
 KSharedMemory::KSharedMemory(std::size_t size)
     : KObject(KernelObjectKind::SharedMemory), bytes(size, 0U) {}
 
@@ -1220,6 +1228,15 @@ bool HorizonKernel::validate_stage9_services() {
            calendar.data[3] == 1U;
 }
 
+CmifResponse HorizonKernel::dispatch_generic_stub(
+    const GenericStubService& service, const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    std::cout << "[GenericStubService] " << service.service_name()
+              << " command " << request.command_id << " -> success\\n";
+    return response;
+}
+
 void HorizonKernel::print_ipc_statistics() const {
     std::cout << "IPC services accessed:\n";
     if (ipc_accessed_.empty()) {
@@ -1264,13 +1281,15 @@ CmifResponse HorizonKernel::dispatch_cmif(
                 response.result = MakeResult(1U, 2U);
                 return response;
             }
-            if (optional_stub)
+            if (optional_stub) {
                 std::cout << "[SM] optional service " << service_name
                           << " routed to GenericStubService\\n";
-            const std::string resolved_name = optional_stub
-                ? "generic_stub:" + service_name : service_name;
-            response.handle = handles_.insert(
-                std::make_shared<KClientSession>(resolved_name));
+                response.handle = handles_.insert(
+                    std::make_shared<GenericStubService>(service_name));
+            } else {
+                response.handle = handles_.insert(
+                    std::make_shared<KClientSession>(service_name));
+            }
             response.move_handle = true;
             return response;
         }
@@ -1321,8 +1340,7 @@ CmifResponse HorizonKernel::dispatch_cmif(
         session.service_name() == "IWindowController" ||
         session.service_name() == "IApplicationFunctions" ||
         session.service_name() == "IAudioController" ||
-        session.service_name() == "IDisplayController" ||
-        session.service_name().starts_with("generic_stub:"))
+        session.service_name() == "IDisplayController")
         return dispatch_applet_service(session.service_name(), request);
 
     if (session.service_name() == "acc:u0")
@@ -1431,6 +1449,13 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
                 commands.push_back(request.command_id);
             response = dispatch_cmif(
                 *std::static_pointer_cast<KClientSession>(object), request);
+        } else if (object->kind() == KernelObjectKind::GenericStubService) {
+            const auto stub = std::static_pointer_cast<GenericStubService>(object);
+            auto& commands = ipc_accessed_[stub->service_name()];
+            if (std::find(commands.begin(), commands.end(), request.command_id) ==
+                commands.end())
+                commands.push_back(request.command_id);
+            response = dispatch_generic_stub(*stub, request);
         } else if (object->kind() == KernelObjectKind::Storage) {
             response = dispatch_storage(
                 *std::static_pointer_cast<KStorage>(object), request);
@@ -1456,6 +1481,8 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
             std::cerr << "[HorizonKernel] IPC ";
             if (object->kind() == KernelObjectKind::ClientSession)
                 std::cerr << std::static_pointer_cast<KClientSession>(object)->service_name();
+            else if (object->kind() == KernelObjectKind::GenericStubService)
+                std::cerr << std::static_pointer_cast<GenericStubService>(object)->service_name();
             else
                 std::cerr << "object";
             std::cerr << " command " << request.command_id
