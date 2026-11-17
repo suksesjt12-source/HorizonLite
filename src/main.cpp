@@ -564,9 +564,11 @@ void verify_self_test(const horizon::AddressSpace& memory) {
     constexpr std::uint32_t expected_rgba = 0xFFF0B842U;
     const std::uint32_t actual = memory.read_u32(pixel_address);
     if (actual != expected_rgba) {
-        std::cerr << "  Sprite source first pixel: 0x" << std::hex
+        std::cerr << "  Sprite pixel (0,0): 0x" << std::hex
                   << memory.read_u32(kSpriteBufferAddress)
-                  << "  Framebuffer probe: 0x" << actual << std::dec << '\\n';
+                  << "  Sprite pixel (1,1): 0x"
+                  << memory.read_u32(kSpriteBufferAddress + 68U)
+                  << "  Framebuffer probe: 0x" << actual << std::dec << '\n';
         throw std::runtime_error("RomFS sprite self-test failed: guest did not draw expected RGBA pixel");
     }
     std::cout << "RomFS/fsp-srv/HIPC sprite self-test passed\n"
