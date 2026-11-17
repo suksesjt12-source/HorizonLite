@@ -2,6 +2,7 @@
 #include "horizon/display.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <iomanip>
 #include <iostream>
@@ -159,6 +160,9 @@ const std::string& KClientSession::service_name() const noexcept {
 
 KSharedMemory::KSharedMemory(std::size_t size)
     : KObject(KernelObjectKind::SharedMemory), bytes(size, 0U) {}
+
+KThread::KThread(std::size_t index)
+    : KObject(KernelObjectKind::Thread), thread_index(index) {}
 
 KEvent::KEvent() noexcept : KObject(KernelObjectKind::Event) {}
 
@@ -1347,42 +1351,58 @@ void HorizonKernel::svc_wait_synchronization(CpuState& state) {
         const auto raw_handles = memory_.view(
             handles_address, static_cast<std::size_t>(handle_count) * 4U,
             Permission::Read);
-        std::vector<Handle> handles;
-        handles.reserve(static_cast<std::size_t>(handle_count));
+        std::vector<Handle> wait_handles;
+        wait_handles.reserve(static_cast<std::size_t>(handle_count));
         for (std::size_t index = 0; index < handle_count; ++index)
-            handles.push_back(read_le32(raw_handles, index * 4U));
+            wait_handles.push_back(read_le32(raw_handles, index * 4U));
 
-        const auto find_signaled = [&]() -> std::optional<std::uint32_t> {
-            for (std::size_t index = 0; index < handles.size(); ++index) {
-                const auto object = handles_.get(handles[index]);
-                if (object && object->kind() == KernelObjectKind::Event &&
-                    std::static_pointer_cast<KEvent>(object)->signaled) {
+        const auto find_ready = [this, &wait_handles]()
+            -> std::optional<std::uint32_t> {
+            for (std::size_t index = 0; index < wait_handles.size(); ++index) {
+                const auto object = handles_.get(wait_handles[index]);
+                if (!object) return std::nullopt;
+                if (object->kind() == KernelObjectKind::Event &&
+                    std::static_pointer_cast<KEvent>(object)->signaled)
                     return static_cast<std::uint32_t>(index);
-                }
             }
             return std::nullopt;
         };
 
-        std::optional<std::uint32_t> ready = find_signaled();
-        for (unsigned attempt = 0U; !ready.has_value() && attempt < 120U; ++attempt) {
-            update_audio_events();
-            ready = find_signaled();
-            if (!ready.has_value()) SDL_Delay(1U);
+        const auto ready = find_ready();
+        if (ready.has_value()) {
+            state.x[0] = kSuccess;
+            state.x[1] = *ready;
+            return;
         }
 
-        if (!ready.has_value()) {
-            for (std::size_t index = 0; index < handles.size(); ++index) {
-                const auto object = handles_.get(handles[index]);
-                if (object && object->kind() == KernelObjectKind::Event) {
-                    std::static_pointer_cast<KEvent>(object)->signaled = true;
-                    ready = static_cast<std::uint32_t>(index);
-                    break;
-                }
+        if (active_thread_) {
+            const std::int64_t timeout_ns =
+                static_cast<std::int64_t>(state.x[3]);
+            if (timeout_ns == 0) {
+                state.x[0] = 0xEA01U;
+                state.x[1] = 0U;
+                return;
             }
+            active_thread_->waiting_handles = std::move(wait_handles);
+            active_thread_->has_deadline = timeout_ns > 0;
+            if (timeout_ns > 0) {
+                active_thread_->wake_deadline =
+                    std::chrono::steady_clock::now() +
+                    std::chrono::nanoseconds(timeout_ns);
+            }
+            active_thread_->status = ThreadStatus::WaitingSynchronization;
+            request_scheduler_yield();
+            return;
         }
 
-        state.x[1] = ready.value_or(0U);
-        state.x[0] = ready.has_value() ? kSuccess : kInvalidHandle;
+        std::optional<std::uint32_t> legacy_ready;
+        for (unsigned attempt = 0U; !legacy_ready.has_value() && attempt < 120U; ++attempt) {
+            update_audio_events();
+            legacy_ready = find_ready();
+            if (!legacy_ready.has_value()) SDL_Delay(1U);
+        }
+        state.x[0] = legacy_ready.has_value() ? kSuccess : 0xEA01U;
+        state.x[1] = legacy_ready.value_or(0U);
     } catch (const std::exception&) {
         state.x[0] = kInvalidArgument;
         state.x[1] = 0U;
@@ -1501,11 +1521,17 @@ void SvcHandler::dispatch(std::uint16_t immediate, CpuState& state) {
     switch (immediate) {
     case 0x01: kernel_.svc_set_heap_size(state); break;
     case 0x07: kernel_.svc_exit_process(state); break;
+    case 0x08: kernel_.svc_create_thread(state); break;
     case 0x09: kernel_.svc_close_handle(state); break;
+    case 0x0A: kernel_.svc_start_thread(state); break;
+    case 0x0B: kernel_.svc_exit_thread(state); break;
+    case 0x0C: kernel_.svc_sleep_thread(state); break;
     case 0x14: kernel_.svc_map_shared_memory(state); break;
     case 0x15: kernel_.svc_unmap_shared_memory(state); break;
     case 0x17: kernel_.svc_reset_signal(state); break;
     case 0x18: kernel_.svc_wait_synchronization(state); break;
+    case 0x1A: kernel_.svc_arbitrate_lock(state); break;
+    case 0x1B: kernel_.svc_arbitrate_unlock(state); break;
     case 0x1F: kernel_.svc_connect_to_named_port(state); break;
     case 0x21: kernel_.svc_send_sync_request(state); break;
     case 0x26: kernel_.svc_break(state); break;
@@ -1519,5 +1545,8 @@ void SvcHandler::dispatch(std::uint16_t immediate, CpuState& state) {
 }
 
 bool SvcHandler::running() const noexcept { return kernel_.running(); }
+bool SvcHandler::yield_requested() const noexcept {
+    return kernel_.yield_requested();
+}
 
 } // namespace horizon
