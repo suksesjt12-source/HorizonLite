@@ -924,7 +924,7 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
     if (self_test) {
         kernel.update_hid_input(horizon::HidButtonA);
         const std::size_t executed =
-            cpu.run(kHeadlessInstructionLimit, kStopAddress);
+            kernel.run_scheduler(cpu, kHeadlessInstructionLimit, kStopAddress);
         std::cout << "Executed guest instructions: " << executed << '\n';
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         kernel.update_audio_events();
@@ -932,7 +932,8 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         return 0;
     }
 
-    const std::size_t executed = cpu.run(20000000U, kStopAddress);
+    const std::size_t executed =
+        kernel.run_scheduler(cpu, 20000000U, kStopAddress);
     std::cout << "Executed instructions: " << executed << '\n';
     if (kernel.running()) {
         std::cerr << "Execution reached the headless instruction limit.\n";
@@ -954,7 +955,8 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         kernel.update_hid_input(display.read_controller_buttons());
         kernel.update_audio_events();
         if (kernel.running())
-            (void)cpu.run(kInteractiveInstructionBudget, kStopAddress);
+            (void)kernel.run_scheduler(
+                cpu, kInteractiveInstructionBudget, kStopAddress, 750U);
         kernel.update_audio_events();
         display.render(kernel.display_pixels(),
                        kFramebufferWidth, kFramebufferHeight);
