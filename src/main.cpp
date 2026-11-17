@@ -41,6 +41,9 @@ constexpr std::uint64_t kPcmBufferAddress = 0x22000000ULL;
 constexpr std::uint64_t kAudioBufferHeaderAddress = 0x22010000ULL;
 constexpr std::uint64_t kAudioReleasedArrayAddress = 0x22011000ULL;
 constexpr std::uint64_t kStage6ScratchAddress = 0x23000000ULL;
+constexpr std::uint64_t kWorkerThreadTextAddress = 0x00108000ULL;
+constexpr std::uint64_t kSharedThreadDataOffset = 0x00900000ULL;
+constexpr std::uint32_t kMainThreadHandle = 0x101U;
 constexpr std::uint64_t kStopAddress = std::numeric_limits<std::uint64_t>::max();
 constexpr std::size_t kInteractiveInstructionBudget = 180000U;
 constexpr std::size_t kHeadlessInstructionLimit = 1000000U;
@@ -128,6 +131,35 @@ public:
 
     void strh(unsigned rt, unsigned rn, unsigned offset) {
         emit(0x79000000U | ((offset / 2U) << 10U) | (rn << 5U) | rt);
+    }
+
+    void ldaxr_w(unsigned rt, unsigned rn) {
+        emit(0x885FFC00U | (rn << 5U) | rt);
+    }
+
+    void stlxr_w(unsigned rs, unsigned rt, unsigned rn) {
+        emit(0x8800FC00U | (rs << 16U) | (rn << 5U) | rt);
+    }
+
+    void scvtf_s(unsigned rd, unsigned rn) {
+        emit(0x1E220000U | (rn << 5U) | rd);
+    }
+
+    void fmov_s_imm(unsigned rd, std::uint8_t immediate) {
+        emit(0x1E201000U |
+             (static_cast<std::uint32_t>(immediate) << 13U) | rd);
+    }
+
+    void fadd_s(unsigned rd, unsigned rn, unsigned rm) {
+        emit(0x1E202800U | (rm << 16U) | (rn << 5U) | rd);
+    }
+
+    void fmul_s(unsigned rd, unsigned rn, unsigned rm) {
+        emit(0x1E200800U | (rm << 16U) | (rn << 5U) | rd);
+    }
+
+    void fcvtzs_w_s(unsigned rd, unsigned rn) {
+        emit(0x1E380000U | (rn << 5U) | rd);
     }
 
     void ldr_w(unsigned rt, unsigned rn, unsigned offset) {
@@ -340,6 +372,41 @@ void emit_named_service_request(A64Assembler& a, std::uint64_t name_address) {
                       name_address, 8U);
 }
 
+std::vector<std::uint32_t> build_worker_thread_program() {
+    A64Assembler a;
+    a.mov_reg(19U, 0U);
+
+    a.bind("worker_lock_retry");
+    a.ldaxr_w(2U, 19U);
+    a.cbz(2U, "worker_try_atomic_lock");
+    a.mov_reg(0U, 2U);
+    a.mov_reg(1U, 19U);
+    a.ldr_w(2U, 19U, 8U);
+    a.svc(0x1AU);
+    a.branch("worker_mutex_acquired");
+
+    a.bind("worker_try_atomic_lock");
+    a.ldr_w(3U, 19U, 8U);
+    a.stlxr_w(4U, 3U, 19U);
+    a.cbnz(4U, "worker_lock_retry");
+
+    a.bind("worker_mutex_acquired");
+    a.ldr_w(5U, 19U, 4U);
+    a.scvtf_s(0U, 5U);
+    a.fmov_s_imm(1U, 0x70U);
+    a.fmul_s(2U, 0U, 1U);
+    a.fadd_s(2U, 2U, 1U);
+    a.fcvtzs_w_s(5U, 2U);
+    a.str_w(5U, 19U, 4U);
+
+    a.mov_reg(0U, 19U);
+    a.svc(0x1BU);
+    a.mov64(0U, 1000000U);
+    a.svc(0x0CU);
+    a.branch("worker_lock_retry");
+    return a.finish();
+}
+
 std::vector<std::uint32_t> build_self_test_program() {
     A64Assembler a;
 
@@ -353,6 +420,24 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.svc(0x01U);
     a.mov64(2U, kStage6ScratchAddress);
     a.str_x(1U, 2U, 0x80U);
+
+    a.mov_reg(8U, 1U);
+    a.mov64(10U, kSharedThreadDataOffset);
+    a.add_reg(9U, 8U, 10U);
+    a.movz(11U, 0U);
+    a.str_w(11U, 9U, 0U);
+    a.movz(11U, 100U);
+    a.str_w(11U, 9U, 4U);
+    a.mov64(1U, kWorkerThreadTextAddress);
+    a.mov_reg(2U, 9U);
+    a.mov64(10U, 0x00C00000U);
+    a.add_reg(3U, 8U, 10U);
+    a.mov64(4U, 0x2CU);
+    a.movz(5U, 0U);
+    a.svc(0x08U);
+    a.str_w(1U, 9U, 8U);
+    a.mov_reg(0U, 1U);
+    a.svc(0x0AU);
 
     emit_named_service_request(a, kSelfTestStringsAddress + 48U);
     a.mov_reg(0U, 19U);
@@ -650,6 +735,32 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.add_imm(29U, 29U, 0x00400000U, true);
     a.bind("use_framebuffer_slot_zero");
 
+    a.mov64(10U, kStage6ScratchAddress);
+    a.ldr_x(13U, 10U, 0x80U);
+    a.mov64(11U, kSharedThreadDataOffset);
+    a.add_reg(13U, 13U, 11U);
+
+    a.bind("main_lock_retry");
+    a.ldaxr_w(10U, 13U);
+    a.cbz(10U, "main_try_atomic_lock");
+    a.mov_reg(0U, 10U);
+    a.mov_reg(1U, 13U);
+    a.mov64(2U, kMainThreadHandle);
+    a.svc(0x1AU);
+    a.branch("main_mutex_acquired");
+
+    a.bind("main_try_atomic_lock");
+    a.mov64(11U, kMainThreadHandle);
+    a.stlxr_w(12U, 11U, 13U);
+    a.cbnz(12U, "main_lock_retry");
+
+    a.bind("main_mutex_acquired");
+    a.movz(0U, 0U);
+    a.svc(0x0CU);
+    a.ldr_w(19U, 13U, 4U);
+    a.mov_reg(0U, 13U);
+    a.svc(0x1BU);
+
     a.mov_reg(0U, 19U);
     a.mov_reg(1U, 18U);
     a.mov_reg(2U, 17U);
@@ -858,6 +969,15 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
         'D', 'e', 'f', 'a', 'u', 'l', 't', 0U
     };
     memory.map(kSelfTestTextAddress, std::move(text),
+               horizon::Permission::Read | horizon::Permission::Execute);
+    const auto worker_instructions = build_worker_thread_program();
+    std::vector<std::uint8_t> worker_text;
+    worker_text.reserve(worker_instructions.size() * sizeof(std::uint32_t));
+    for (const std::uint32_t instruction : worker_instructions) {
+        for (unsigned byte = 0U; byte < 4U; ++byte)
+            worker_text.push_back(static_cast<std::uint8_t>(instruction >> (byte * 8U)));
+    }
+    memory.map(kWorkerThreadTextAddress, std::move(worker_text),
                horizon::Permission::Read | horizon::Permission::Execute);
     memory.map(kSelfTestStringsAddress, service_strings,
                horizon::Permission::Read);
