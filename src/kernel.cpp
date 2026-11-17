@@ -1233,7 +1233,7 @@ CmifResponse HorizonKernel::dispatch_generic_stub(
     CmifResponse response;
     response.command_id = request.command_id;
     std::cout << "[GenericStubService] " << service.service_name()
-              << " command " << request.command_id << " -> success\\n";
+              << " command " << request.command_id << " -> success\n";
     return response;
 }
 
@@ -1283,7 +1283,7 @@ CmifResponse HorizonKernel::dispatch_cmif(
             }
             if (optional_stub) {
                 std::cout << "[SM] optional service " << service_name
-                          << " routed to GenericStubService\\n";
+                          << " routed to GenericStubService\n";
                 response.handle = handles_.insert(
                     std::make_shared<GenericStubService>(service_name));
             } else {
