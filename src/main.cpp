@@ -655,7 +655,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.svc(0x21U);
 
     emit_named_service_request(a, kSelfTestStringsAddress + 16U);
-    a.mov_reg(0U, 21U);
+    a.mov_reg(0U, 19U);
     a.svc(0x21U);
     a.ldr_w(27U, 20U, 12U);
 
@@ -981,8 +981,8 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
                horizon::Permission::Read | horizon::Permission::Execute);
     memory.map(kSelfTestStringsAddress, service_strings,
                horizon::Permission::Read);
-    std::cout << "HorizonLite Stage 6 self-test: guest allocates two nvmap frame slots from its heap, "
-                 "opens vi:m, transacts with IGraphicBufferProducer, and queues the RomFS sprite.\n";
+    std::cout << "HorizonLite Stage 7 self-test: main and worker threads share an atomic mutex, "
+                 "the worker updates sprite motion with ARM64 FP instructions, and vi:m presents frames.\n";
     return kSelfTestTextAddress;
 }
 
