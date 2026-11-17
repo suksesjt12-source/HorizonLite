@@ -1,4 +1,4 @@
-# HorizonLite — Stage 8: Account, System Settings and persistent save data
+# HorizonLite — Stage 9: libnx startup, appletOE and time services
 
 HorizonLite is an educational C++20 HLE research prototype for a bounded AArch64 instruction set, selected Horizon-style SVCs and HIPC/CMIF services, HID input, NRO ASET/RomFS access, SDL2 audio, and a host-rendered display pipeline.
 
@@ -125,6 +125,29 @@ ctest --test-dir build --output-on-failure
 
 **Scope:** this stage provides one built-in profile and fixed compatibility settings. The filesystem command layer implements the specified subset and basic path sandboxing; it does not yet model all save-data metadata, journaling, multi-user account management, file timestamps, rights checks, or the full Horizon result-code space. The emulator is still a host-rendered HLE prototype and this desktop SDL2 workflow does not produce an Android APK.
 
+## Stage 9: Finalization Target 1 — standard 2D NRO startup
+
+Stage 9 adds a reduced libnx-compatible process startup contract and the service calls commonly used by basic 2D homebrew:
+
+- `LoaderConfig` entries use the 24-byte `{u32 key, u32 flags, u64 value[2]}` layout for MainThreadHandle, OverrideHeap, AppletType, ProcessHandle, RandomSeed and EndOfList. The entry pointer is supplied in X0 and X1 is initialized to `UINT64_MAX`.
+- A 1 MiB main-thread stack, a 128 MiB preallocated guest heap and a dedicated virtual LoaderConfig page are mapped before guest execution. `svcSetHeapSize` may claim a size up to the preallocated heap capacity.
+- The NRO loader treats section offsets as virtual offsets relative to the program image, reads section bytes after the 0x80-byte NRO header, relocates all three segments at a configurable load base, zero-initializes the BSS range, and extracts the optional ASET RomFS.
+- `appletOE` exposes IApplicationProxy, ICommonStateGetter, ISelfController, IWindowController, IAudioController, IDisplayController and IApplicationFunctions. The initial FocusStateChanged message is queued, the applet event starts signaled, and an empty message queue returns `MakeResult(128, 3) = 0x680`.
+- `time:u`, `time:s` and `time:a` expose system clock, steady clock and time-zone sessions. The timezone implementation returns UTC location data and converts POSIX timestamps into the 0x20-byte CalendarTime + CalendarAdditionalInfo result layout using `gmtime`.
+- Optional `apm`, `psm`, `bpc`, `spl:` and `hid:dbg` requests are routed to a logging GenericStubService. The dispatcher records unique command IDs per service.
+- Closing the SDL2 window queues AppletMessage_ExitRequest and signals the applet event before allowing a bounded guest cleanup slice.
+
+Run an external NRO with:
+
+```sh
+./build/horizonlite path/to/homebrew.nro
+./build/horizonlite path/to/homebrew.nro --headless
+```
+
+The built-in headless startup test now checks the LoaderConfig keys/values, applet focus and initial/no-message behavior, and the UTC calendar conversion. A separate LoaderConfig test validates the 24-byte entry ABI. The executable prints guest instruction totals and the service/command IDs observed in the IPC dispatcher.
+
+**Compatibility boundary:** this is still a bounded AArch64 interpreter and HLE prototype. It is not a complete Switch emulator and does not promise that arbitrary third-party NROs will run. Standard homebrew can still depend on unsupported AArch64 instructions, relocations, TLS/runtime setup, IPC descriptor forms, GPU/audio behavior, filesystem commands or services. The optional GenericStubService prevents an unimplemented optional service request from failing immediately; it does not implement the requested service's functionality. CI validates the built-in guest and loader structures, not compatibility with a broad external NRO corpus.
+
 ## Retained Stage 6 display and GPU-memory HLE
 
 Stage 6 functionality remains available:
@@ -139,13 +162,15 @@ The display path is host-backed HLE, not Tegra GPU command execution. It does no
 
 ## Tests
 
-The CTest suite contains five targets:
+The CTest suite contains seven targets:
 
-1. `horizonlite_headless_self_test`: guest heap, nvdrv/vi:m Binder display, worker thread, mutex contention, moving sprite and audio initialization
-2. `horizonlite_cpu_memory_test`: existing ARM64 integer/memory and SDL2 audio tests
-3. `horizonlite_thread_atomic_fpu_test`: 32/64-bit exclusive load/store, reservation invalidation, CLREX, scalar single/double FP conversions/arithmetic/FMOV/FCMP
-4. `horizonlite_romfs_asset_test`: NRO ASET/RomFS parsing and asset building
+1. `horizonlite_headless_self_test`: built-in guest, account/settings/save data, LoaderConfig, appletOE/time:u, nvdrv/vi:m Binder display, worker thread and audio initialization
+2. `horizonlite_cpu_memory_test`: ARM64 integer/memory and SDL2 audio tests
+3. `horizonlite_thread_atomic_fpu_test`: exclusive load/store, reservation invalidation, CLREX and scalar FP
+4. `horizonlite_romfs_asset_test`: NRO ASET/RomFS parsing, relocated section loading and zero-filled BSS
 5. `horizonlite_display_gpu_test`: Tegra GOB conversion and linear framebuffer fallback
+6. `horizonlite_save_data_relaunch_test`: second headless run against persistent save data
+7. `horizonlite_loader_config_test`: 24-byte LoaderConfig entries, keys and values
 
 Build and test:
 

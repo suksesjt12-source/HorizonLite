@@ -57,7 +57,10 @@ int main() {
         nro[0x13U] = '0';
         write_u32(nro, 0x18U, static_cast<std::uint32_t>(nro_size));
         write_u32(nro, 0x20U, 0U);
-        write_u32(nro, 0x24U, static_cast<std::uint32_t>(nro_size));
+        write_u32(nro, 0x24U, 0x80U);
+        write_u32(nro, 0x30U, 0x80U);
+        write_u32(nro, 0x34U, 0U);
+        write_u32(nro, 0x38U, 0x40U);
         write_u32(nro, nro_size, 0x54455341U);
         write_u32(nro, nro_size + 4U, 0U);
         write_u64(nro, nro_size + 0x28U, asset_header_size);
@@ -66,8 +69,20 @@ int main() {
                   nro.begin() + static_cast<std::ptrdiff_t>(nro_size + asset_header_size));
 
         const horizon::NroImage parsed = horizon::NroLoader::parse(nro);
-        if (parsed.romfs != romfs)
-            throw std::runtime_error("NRO ASET parser did not extract the exact RomFS blob");
+        if (parsed.romfs != romfs || parsed.entry_point != 0U ||
+            parsed.bss_size != 0x40U)
+            throw std::runtime_error("NRO ASET/header parsing failed");
+
+        horizon::AddressSpace memory;
+        constexpr std::uint64_t load_base = 0x01000000U;
+        const horizon::NroImage loaded = horizon::NroLoader::load(nro, memory, load_base);
+        if (loaded.entry_point != load_base ||
+            loaded.bss_base != load_base + 0x80U ||
+            memory.read_u8(load_base + 0U) != nro[0x80U] ||
+            memory.read_u8(load_base + 0x7FU) != nro[0xFFU] ||
+            memory.read_u8(loaded.bss_base) != 0U ||
+            memory.read_u8(loaded.bss_base + 0x3FU) != 0U)
+            throw std::runtime_error("NRO segment relocation or zero-filled BSS failed");
 
         std::cout << "RomFS builder and NRO ASET extraction test passed\n";
         return 0;
