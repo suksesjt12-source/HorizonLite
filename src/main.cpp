@@ -1017,28 +1017,41 @@ LoadedProgram load_program(const Options& options,
     return LoadedProgram{image.entry_point, image.romfs, false};
 }
 
-void verify_self_test(std::span<const std::uint8_t> pixels,
+void verify_self_test(const horizon::AddressSpace& memory,
+                       std::span<const std::uint8_t> pixels,
                        std::uint64_t frame_number) {
-    const std::size_t pixel_offset =
-        (static_cast<std::size_t>(101U) * kFramebufferWidth + 101U) * 4U;
     constexpr std::uint32_t expected_rgba = 0xFFF0B842U;
     if (pixels.size() < kFramebufferBytes || frame_number == 0U)
         throw std::runtime_error("Display self-test did not queue a complete framebuffer");
-    const std::uint32_t actual =
-        static_cast<std::uint32_t>(pixels[pixel_offset]) |
-        (static_cast<std::uint32_t>(pixels[pixel_offset + 1U]) << 8U) |
-        (static_cast<std::uint32_t>(pixels[pixel_offset + 2U]) << 16U) |
-        (static_cast<std::uint32_t>(pixels[pixel_offset + 3U]) << 24U);
-    if (actual != expected_rgba) {
-        std::cerr << "  Display pixel probe: 0x" << std::hex
-                  << actual << std::dec << '\n';
-        throw std::runtime_error("vi:m/nvmap QueueBuffer did not present the expected guest sprite pixel");
-    }
-    std::cout << "vi:m + nvdrv/nvmap + Binder QueueBuffer self-test passed\n"
-              << "  Presented sprite pixel: 0x" << std::hex << actual << std::dec
-              << "  Frames: " << frame_number << '\n';
-}
 
+    bool sprite_pixel_found = false;
+    for (std::size_t offset = 0U; offset + 4U <= kFramebufferBytes; offset += 4U) {
+        const std::uint32_t pixel =
+            static_cast<std::uint32_t>(pixels[offset]) |
+            (static_cast<std::uint32_t>(pixels[offset + 1U]) << 8U) |
+            (static_cast<std::uint32_t>(pixels[offset + 2U]) << 16U) |
+            (static_cast<std::uint32_t>(pixels[offset + 3U]) << 24U);
+        if (pixel == expected_rgba) {
+            sprite_pixel_found = true;
+            break;
+        }
+    }
+
+    const std::uint64_t heap_base = memory.read_u64(kStage6ScratchAddress + 0x80U);
+    const std::uint64_t shared_data =
+        heap_base + kSharedThreadDataOffset;
+    const std::uint32_t worker_position =
+        memory.read_u32(shared_data + 4U);
+    if (!sprite_pixel_found || worker_position == 100U) {
+        std::cerr << "  Sprite pixel found: " << sprite_pixel_found
+                  << "  Worker position: " << worker_position << '\\n';
+        throw std::runtime_error(
+            "vi:m QueueBuffer did not present the moving RomFS sprite from the worker thread");
+    }
+    std::cout << "vi:m + nvdrv/nvmap + Binder QueueBuffer + worker-thread motion self-test passed\\n"
+              << "  Worker position: " << worker_position
+              << "  Frames: " << frame_number << '\\n';
+}
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                  const horizon::AddressSpace& memory, bool self_test) {
     if (self_test) {
@@ -1048,7 +1061,8 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         std::cout << "Executed guest instructions: " << executed << '\n';
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         kernel.update_audio_events();
-        verify_self_test(kernel.display_pixels(), kernel.display_frame_number());
+        verify_self_test(memory, kernel.display_pixels(),
+                        kernel.display_frame_number());
         return 0;
     }
 
