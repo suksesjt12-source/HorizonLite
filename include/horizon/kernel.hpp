@@ -5,6 +5,7 @@
 #include "horizon/memory.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -27,7 +28,8 @@ enum class KernelObjectKind : std::uint8_t {
     Event,
     AudioOut,
     BinderDriver,
-    DisplayLayer
+    DisplayLayer,
+    Thread
 };
 
 class KObject {
@@ -59,6 +61,31 @@ class KSharedMemory final : public KObject {
 public:
     explicit KSharedMemory(std::size_t size);
     std::vector<std::uint8_t> bytes;
+};
+
+enum class ThreadStatus : std::uint8_t {
+    Suspended,
+    Runnable,
+    Sleeping,
+    WaitingLock,
+    WaitingSynchronization,
+    Terminated
+};
+
+class KThread final : public KObject {
+public:
+    explicit KThread(std::size_t thread_index);
+
+    Handle handle{};
+    std::size_t thread_index{};
+    CpuState context{};
+    ThreadStatus status{ThreadStatus::Suspended};
+    std::int32_t priority{0x2C};
+    std::int32_t processor_id{-1};
+    std::uint64_t waiting_mutex{};
+    std::vector<Handle> waiting_handles;
+    std::chrono::steady_clock::time_point wake_deadline{};
+    bool has_deadline{};
 };
 
 class KStorage final : public KObject {
@@ -198,6 +225,19 @@ public:
     void svc_close_handle(CpuState& state);
     void svc_reset_signal(CpuState& state);
     void svc_wait_synchronization(CpuState& state);
+    void svc_create_thread(CpuState& state);
+    void svc_start_thread(CpuState& state);
+    void svc_exit_thread(CpuState& state) noexcept;
+    void svc_sleep_thread(CpuState& state);
+    void svc_arbitrate_lock(CpuState& state);
+    void svc_arbitrate_unlock(CpuState& state);
+    void initialize_scheduler(const CpuState& initial_context);
+    [[nodiscard]] std::size_t run_scheduler(
+        Arm64Cpu& cpu, std::size_t max_instructions,
+        std::uint64_t stop_pc, std::size_t time_slice = 750U);
+    [[nodiscard]] std::size_t scheduled_thread_count() const noexcept;
+    [[nodiscard]] Handle current_thread_handle() const noexcept;
+    [[nodiscard]] bool yield_requested() const noexcept;
     void update_hid_input(std::uint64_t buttons);
     void update_audio_events();
 
@@ -243,6 +283,12 @@ private:
         const CmifRequest& request) const noexcept;
     void update_audio_out(const std::shared_ptr<KAudioOut>& audio_out);
     void release_all_audio_buffers(const std::shared_ptr<KAudioOut>& audio_out);
+    void request_scheduler_yield() noexcept;
+    void reset_all_exclusive_monitors() noexcept;
+    void update_thread_waiters();
+    [[nodiscard]] std::shared_ptr<KThread> find_thread(Handle handle) const noexcept;
+    [[nodiscard]] std::shared_ptr<KThread> next_runnable_thread();
+    [[nodiscard]] bool any_runnable_thread() const noexcept;
 
     static constexpr std::uint64_t kHeapBase = 0x50000000ULL;
     static constexpr std::uint64_t kMaximumHeapSize = 0x10000000ULL;
@@ -266,6 +312,13 @@ private:
     std::uint32_t next_nvmap_handle_{1U};
     std::uint32_t next_nvmap_id_{1U};
     std::unordered_map<Handle, SharedMapping> shared_mappings_;
+    std::vector<std::shared_ptr<KThread>> threads_;
+    std::shared_ptr<KThread> active_thread_;
+    std::shared_ptr<KThread> main_thread_;
+    std::size_t next_thread_index_{1U};
+    std::size_t scheduler_cursor_{};
+    bool scheduler_initialized_{};
+    bool scheduler_yield_requested_{};
     std::uint64_t sampling_number_{};
     std::uint64_t heap_size_{};
     bool running_{true};
@@ -276,6 +329,7 @@ public:
     explicit SvcHandler(HorizonKernel& kernel) noexcept;
     void dispatch(std::uint16_t immediate, CpuState& state);
     [[nodiscard]] bool running() const noexcept;
+    [[nodiscard]] bool yield_requested() const noexcept;
 private:
     HorizonKernel& kernel_;
 };
