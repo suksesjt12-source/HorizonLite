@@ -459,8 +459,9 @@ std::vector<std::uint32_t> build_self_test_program() {
     const std::vector<std::uint8_t> connect_parcel{
         1U, 0U, 0U, 0U, 10U, 0U, 0U, 0U
     };
-    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U,
-                      connect_parcel);
+    emit_cmif_request_send_receive(
+        a, 0U, kStage6ScratchAddress + 0x350U, 0U,
+        kStage6ScratchAddress + 0x3A0U, 0x80U, connect_parcel);
     a.ldr_w(0U, 2U, 0x9CU);
     a.svc(0x21U);
 
@@ -477,9 +478,9 @@ std::vector<std::uint32_t> build_self_test_program() {
     const std::vector<std::uint8_t> set_preallocated{
         1U, 0U, 0U, 0U, 14U, 0U, 0U, 0U
     };
-    emit_cmif_request(a, 0U, IpcDescriptorKind::Send,
-                      kStage6ScratchAddress + 0x300U, 24U,
-                      set_preallocated);
+    emit_cmif_request_send_receive(
+        a, 0U, kStage6ScratchAddress + 0x300U, 24U,
+        kStage6ScratchAddress + 0x3A0U, 8U, set_preallocated);
     a.ldr_w(0U, 2U, 0x9CU);
     a.svc(0x21U);
 
@@ -718,7 +719,7 @@ std::vector<std::uint32_t> build_self_test_program() {
         1U, 0U, 0U, 0U, 7U, 0U, 0U, 0U
     };
     emit_cmif_request_send_receive(
-        a, 0U, kStage6ScratchAddress + 0x300U, 12U,
+        a, 3U, kStage6ScratchAddress + 0x300U, 12U,
         kStage6ScratchAddress + 0x3C0U, 4U, queue_tx);
     a.ldr_w(0U, 2U, 0x9CU);
     a.svc(0x21U);
