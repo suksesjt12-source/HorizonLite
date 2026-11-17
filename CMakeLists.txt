@@ -77,7 +77,28 @@ else()
     target_compile_options(horizonlite_romfs_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_executable(horizonlite_display_gpu_test
+    tests/display_gpu_test.cpp
+    src/display.cpp
+    src/memory.cpp
+)
+target_include_directories(horizonlite_display_gpu_test PRIVATE include)
+target_compile_features(horizonlite_display_gpu_test PRIVATE cxx_std_20)
+if(TARGET SDL2::SDL2)
+    target_link_libraries(horizonlite_display_gpu_test PRIVATE SDL2::SDL2)
+elseif(TARGET SDL2::SDL2-static)
+    target_link_libraries(horizonlite_display_gpu_test PRIVATE SDL2::SDL2-static)
+elseif(TARGET PkgConfig::SDL2)
+    target_link_libraries(horizonlite_display_gpu_test PRIVATE PkgConfig::SDL2)
+endif()
+if(MSVC)
+    target_compile_options(horizonlite_display_gpu_test PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(horizonlite_display_gpu_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 enable_testing()
 add_test(NAME horizonlite_headless_self_test COMMAND horizonlite --headless)
 add_test(NAME horizonlite_cpu_memory_test COMMAND horizonlite_cpu_test)
 add_test(NAME horizonlite_romfs_asset_test COMMAND horizonlite_romfs_test)
+add_test(NAME horizonlite_display_gpu_test COMMAND horizonlite_display_gpu_test)
