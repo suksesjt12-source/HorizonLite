@@ -23,7 +23,7 @@ int main() {
         0xD2801567U, // MOVZ X7, #0xAB
         0x3900A027U, // STRB W7, [X1, #40]
         0x3940A028U, // LDRB W8, [X1, #40]
-        0x1283E809U, // MOVN W9, #0x1F40 (-8000)
+        0x1283E7E9U, // MOVN W9, #0x1F3F (-8000)
         0x79005429U, // STRH W9, [X1, #42]
         0xD280002BU, // MOVZ X11, #1
         0xCA0B012AU, // EOR X10, X9, X11
