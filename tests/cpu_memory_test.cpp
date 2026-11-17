@@ -52,7 +52,8 @@ int main() {
         memory.read_u64(0x20000 + 24U) == 0x1234U &&
         memory.read_u32(0x20000 + 36U) == 0x58005600U &&
         cpu.state().x[3] == 0x1234U && cpu.state().x[6] == 0x58005600U &&
-        cpu.state().x[4] == 42U && cpu.state().x[8] == 0xABU &&\n        memory.read_u8(0x20000 + 40U) == 0xABU && !kernel.running();
+        cpu.state().x[4] == 42U && cpu.state().x[8] == 0xABU &&
+        memory.read_u8(0x20000 + 40U) == 0xABU && !kernel.running();
 
     if (!passed) {
         std::cerr << "CPU memory/branch test failed; executed=" << executed
