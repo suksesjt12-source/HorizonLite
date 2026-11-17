@@ -13,6 +13,7 @@ add_executable(horizonlite
     src/nro_loader.cpp
     src/cpu.cpp
     src/kernel.cpp
+    src/romfs.cpp
     src/display.cpp
 )
 
@@ -50,6 +51,21 @@ else()
     target_compile_options(horizonlite_cpu_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_executable(horizonlite_romfs_test
+    tests/romfs_asset_test.cpp
+    src/romfs.cpp
+    src/nro_loader.cpp
+    src/memory.cpp
+)
+target_include_directories(horizonlite_romfs_test PRIVATE include)
+target_compile_features(horizonlite_romfs_test PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(horizonlite_romfs_test PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(horizonlite_romfs_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 enable_testing()
 add_test(NAME horizonlite_headless_self_test COMMAND horizonlite --headless)
 add_test(NAME horizonlite_cpu_memory_test COMMAND horizonlite_cpu_test)
+add_test(NAME horizonlite_romfs_asset_test COMMAND horizonlite_romfs_test)

@@ -1,73 +1,63 @@
-# HorizonLite — Stage 3: IPC + HID
+# HorizonLite — Stage 4: NRO RomFS + fsp-srv storage
 
-HorizonLite is an educational C++20 research prototype for a limited subset of AArch64 execution, Horizon-style system calls, HIPC/CMIF service dispatch, HID shared memory, and an SDL2 linear framebuffer.
+HorizonLite is an educational C++20 HLE research prototype for a limited subset of AArch64 execution, Horizon-style SVCs, HIPC/CMIF service dispatch, HID shared memory, the NRO ASET asset section, a subset of Switch RomFS, and an SDL2 linear framebuffer.
 
-It is **not a complete Nintendo Switch emulator**. It does not implement the full Horizon kernel, all AArch64 instructions, GPU command processing, filesystem/content services, NSP/XCI loading, game decryption, or commercial-game compatibility. The IPC framing and HID data structures documented here are a deliberately reduced HLE model for this prototype; they should not be treated as a drop-in ABI implementation for arbitrary retail software or all versions of libnx.
+It is **not a complete Nintendo Switch emulator**. It does not implement the full Horizon kernel, all AArch64 instructions, GPU command processing, complete filesystem services, NSP/XCI loading, NCA decryption, process metadata, or commercial-game compatibility. The IPC framing, NRO boot setup, and service behavior are intentionally bounded to the built-in guest demonstration and should not be treated as full retail ABI compatibility.
 
-## Stage 3 features
+## Stage 4 features
 
-### AArch64 and TLS
+### NRO ASET and embedded RomFS
 
-- Main-thread TLS: 4 KiB at guest virtual address `0x10000000`.
-- TLS bytes `0x00..0xFF` are used as the IPC command buffer.
-- `MRS Xd, TPIDRRO_EL0`.
-- Logical immediate/register forms: `AND`, `ORR`, and the related logical register decoder.
-- `LSL` / `LSR` immediate aliases through `UBFM`.
-- `CBZ`, `CBNZ`, and `BL`.
-- Stage 2 instructions remain available: MOV/MOVZ/MOVK, ADD/SUB, flag-setting arithmetic/CMP, STR/LDR W/X, B, B.cond and RET.
+- Checks for the optional ASET section at file offset `NroHeader.size`.
+- Validates the ASET magic `0x54455341` ("ASET") and version 0.
+- Reads the RomFS asset section's 64-bit offset and size at ASET offsets `0x28` and `0x30`. Asset offsets are relative to the start of the ASET header.
+- Bounds-checks the section against the NRO file and copies the RomFS image into `NroImage::romfs`.
+- The current extractor accepts a direct RomFS image with a 0x50-byte RomFS header. It does not unwrap an IVFC image used by other container formats.
 
-### Kernel handles and SVCs
+The NRO ASET layout is based on the documented optional homebrew assets section in the Switch NRO format. 【turn882866search2】
 
-The kernel handle table stores 32-bit handles referencing `KPort`, `KClientSession`, and `KSharedMemory` objects.
+### RomFsBuilder
 
-| SVC | HLE behavior |
-| --- | --- |
-| `0x01` | `svcSetHeapSize` |
-| `0x07` | `svcExitProcess` |
-| `0x09` | `svcCloseHandle` |
-| `0x14` | `svcMapSharedMemory`: X0 handle, X1 guest address, X2 size |
-| `0x15` | `svcUnmapSharedMemory`: X0 handle, X1 guest address, X2 size |
-| `0x1F` | `svcConnectToNamedPort`: reads the null-terminated port name at X1; returns the session handle in X1 |
-| `0x21` | `svcSendSyncRequest`: sends the TLS command buffer through the selected client session |
-| `0x26` | `svcBreak` |
-| `0x27` | `svcOutputDebugString` |
+- Emits the ten-u64 / 0x50-byte RomFS header.
+- Builds directory hash, directory metadata, file hash, and file metadata tables.
+- Emits a root directory entry and one root-level file entry, with data offset and file size.
+- Places the sample sprite file data at RomFS offset `0x100`.
+- Generates a 16x16 RGBA8888 sample sprite.
 
-Shared-memory unmapping requires the exact guest base and size used for mapping.
+The table fields and metadata entry layouts follow the structures used by libnx's RomFS driver. 【turn500717view0】
 
-### HIPC / CMIF and HLE services
+### HIPC / CMIF buffer descriptors
 
-- The IPC codec parses a HIPC-style command header, the prototype's special-handle descriptor, and CMIF `SFCI` requests.
-- Replies use `SFCO` and encode one optional Copy Handle or Move Handle descriptor.
-- The service manager `sm:` supports `Initialize` (command 0) and `GetService` (command 1, currently `hid`).
-- `IHidServer` supports `CreateAppletResource` (0), `ActivateNpad` (100), `SetSupportedNpadStyleSet` (101), and `SetSupportedNpadIdType` (103).
-- `IAppletResource` supports `GetSharedMemoryHandle` (0), returning a Copy Handle to the HID shared-memory object.
+The Stage 3 CMIF codec is extended to parse the HIPC descriptor counts in the command header and extract:
 
-The reduced HIPC descriptor format used by this test harness is: two 32-bit HIPC header words at offset 0, a 32-bit special-handle descriptor at offset 8, handle values beginning at offset 12, then the CMIF block aligned to 16 bytes. The low descriptor nibble counts Copy Handles and the next nibble counts Move Handles. CMIF begins with a 32-bit magic, version, command ID and token; raw command data follows. The request magic is `SFCI` (`0x49434653`) and the response magic is `SFCO` (`0x4F434653`). This local layout makes the subset deterministic for the built-in guest test; complete Horizon HIPC descriptor parsing and all domain-object semantics are outside this stage.
+- X descriptors (Pointer Buffer).
+- A descriptors (Send Buffer).
+- B descriptors (Receive Buffer).
+- W descriptors (Send/Receive Exchange Buffer).
 
-### HID shared memory
+The service handler validates descriptor sizes and guest memory ranges before reading from or writing to guest memory. The request raw-data area is read according to the HIPC raw-data word count; CMIF requests use `SFCI` and replies use `SFCO`.
 
-- Shared-memory object size: `0x40000` bytes.
-- Npad area base: offset `0x9A00`.
-- Ring-buffer header: 0x20 bytes containing sampling number, buffer count and current entry index.
-- `NpadFullKeyState`-style entry at `0x9A20`; sampling number at entry +0 and 64-bit button mask at entry +8.
-- `NpadHandheldState`-style entry at `0x9A50`, with the same leading fields.
-- The prototype keeps a one-entry ring for each state and increments its sampling number once per SDL2 frame.
+### Filesystem service HLE
 
-Button bits used in this implementation:
+The `sm:` service manager now offers `hid` and `fsp-srv`.
 
-| Button | Bit |
-| --- | ---: |
-| A | 0 |
-| B | 1 |
-| X | 2 |
-| Y | 3 |
-| Plus | 10 |
-| D-pad Left | 12 |
-| D-pad Up | 13 |
-| D-pad Right | 14 |
-| D-pad Down | 15 |
+| Service | Command | Behavior |
+| --- | ---: | --- |
+| `IFileSystemProxy` | 1 | `SetCurrentProcess`: accepts the process-id payload and returns success |
+| `IFileSystemProxy` | 200 | `OpenDataStorageByCurrentProcess`: returns an `IStorage` Move Handle backed by the active NRO RomFS buffer |
+| `IStorage` | 0 | `Read`: validates raw `offset` and `size`, then writes into the first B (Receive Buffer) descriptor |
+| `IStorage` | 4 | `GetSize`: returns the RomFS byte size as a u64 raw response parameter |
 
-SDL2 keyboard mapping: Arrow keys or WASD for D-pad; Z=A; X=B; A=X; S=Y; Enter=Plus. As requested, A and S therefore also activate Left and Down respectively when used as D-pad aliases.
+The Stage 4 `IStorage` object retains the RomFS bytes loaded for the current NRO. For no-argument self-test, the kernel receives the generated RomFS image instead.
+
+### ARM64 memory
+
+The AArch64 interpreter now supports byte memory operations:
+
+- `LDRB Wt, [Xn, #imm]`
+- `STRB Wt, [Xn, #imm]`
+
+Existing 32-bit `LDR Wt` / `STR Wt` and 64-bit `LDR Xt` / `STR Xt` operations remain available. Stage 3 logical, shift, TLS, and branch instructions remain present.
 
 ## Interactive self-test
 
@@ -75,22 +65,22 @@ Run without an NRO path:
 
     ./build/horizonlite
 
-The built-in guest instruction stream performs the following operations itself:
+The generated guest ARM64 program performs the service sequence itself:
 
-1. Reads TLS using `MRS TPIDRRO_EL0`.
-2. Calls `svcConnectToNamedPort("sm:")`.
-3. Builds a CMIF `GetService("hid")` request in TLS and calls `svcSendSyncRequest`.
-4. Requests an `IAppletResource` from `IHidServer`.
-5. Requests the HID shared-memory Copy Handle and maps it with `svcMapSharedMemory`.
-6. Repeatedly reads the Npad button mask and draws a 32x32 box on the 1280x720 framebuffer. D-pad input moves the box.
+1. Connects to `sm:`.
+2. Requests the `hid` service and obtains the HID shared memory.
+3. Requests `fsp-srv`.
+4. Calls `SetCurrentProcess` and `OpenDataStorageByCurrentProcess`.
+5. Calls `IStorage::GetSize` and `IStorage::Read` with a B Receive Buffer descriptor to copy the 16x16 RGBA sprite into guest RAM.
+6. Reads HID input and draws the sprite from guest RAM to the 1280x720 framebuffer.
 
-Press Escape or close the window to exit.
+Arrow keys or WASD move the sprite. Z=A, X=B, A=X, S=Y, and Enter=Plus. Press Escape or close the SDL2 window to exit.
 
-Run the same end-to-end guest self-test without SDL2:
+Run the guest self-test in CI/headless mode:
 
     ./build/horizonlite --headless
 
-Headless mode runs a bounded number of guest instructions and verifies that the guest drew the colored box.
+Headless mode runs a bounded instruction budget and checks that the guest has drawn the expected sprite pixel.
 
 ## Build requirements
 
@@ -110,7 +100,7 @@ Headless mode runs a bounded number of guest instructions and verifies that the 
 
     ./build/horizonlite path/to/homebrew.nro
 
-The current loader accepts only uncompressed NRO images. The interpreter still supports only a subset of AArch64; real homebrew programs may require process startup, relocations, exception handling, additional system calls, additional system services, and a closer implementation of Horizon's exact ABI.
+The loader accepts only uncompressed NRO files in the current NRO subset. If ASET contains a direct RomFS image, it is exposed to the guest through `fsp-srv` and `IStorage`. The interpreter still supports only a subset of AArch64; ordinary homebrew applications may need additional startup, relocations, exception handling, services, filesystem commands, and graphics interfaces that are not implemented here.
 
 ## Project structure
 
@@ -121,14 +111,17 @@ The current loader accepts only uncompressed NRO images. The interpreter still s
     │   ├── display.hpp
     │   ├── kernel.hpp
     │   ├── memory.hpp
-    │   └── nro_loader.hpp
+    │   ├── nro_loader.hpp
+    │   └── romfs.hpp
     ├── src/
     │   ├── cpu.cpp
     │   ├── display.cpp
     │   ├── kernel.cpp
     │   ├── main.cpp
     │   ├── memory.cpp
-    │   └── nro_loader.cpp
+    │   ├── nro_loader.cpp
+    │   └── romfs.cpp
     ├── tests/
-    │   └── cpu_memory_test.cpp
+    │   ├── cpu_memory_test.cpp
+    │   └── romfs_asset_test.cpp
     └── .github/workflows/build.yml

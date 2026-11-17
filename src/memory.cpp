@@ -92,6 +92,12 @@ void AddressSpace::write(std::uint64_t address,
               region.bytes.begin() + static_cast<std::ptrdiff_t>(offset));
 }
 
+void AddressSpace::write_u8(std::uint64_t address, std::uint8_t value) {
+    Region& region = find_region(address, sizeof(value), Permission::Write);
+    const std::size_t offset = static_cast<std::size_t>(address - region.base);
+    region.bytes[offset] = value;
+}
+
 void AddressSpace::write_u32(std::uint64_t address, std::uint32_t value) {
     Region& region = find_region(address, sizeof(value), Permission::Write);
     const std::size_t offset = static_cast<std::size_t>(address - region.base);
@@ -104,6 +110,12 @@ void AddressSpace::write_u64(std::uint64_t address, std::uint64_t value) {
     const std::size_t offset = static_cast<std::size_t>(address - region.base);
     for (unsigned byte = 0; byte < 8U; ++byte)
         region.bytes[offset + byte] = static_cast<std::uint8_t>((value >> (byte * 8U)) & 0xFFU);
+}
+
+std::uint8_t AddressSpace::read_u8(std::uint64_t address, Permission access) const {
+    const Region& region = find_region(address, sizeof(std::uint8_t), access);
+    const std::size_t offset = static_cast<std::size_t>(address - region.base);
+    return region.bytes[offset];
 }
 
 std::uint32_t AddressSpace::read_u32(std::uint64_t address, Permission access) const {
