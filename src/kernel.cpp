@@ -120,7 +120,10 @@ KEvent::KEvent() noexcept : KObject(KernelObjectKind::Event) {}
 KAudioOut::KAudioOut(SdlAudioOutput& output)
     : KObject(KernelObjectKind::AudioOut),
       device(output),
-      buffer_event(std::make_shared<KEvent>()) {}
+      buffer_event(std::make_shared<KEvent>()),
+      started(true) {
+    device.pause(false);
+}
 
 KStorage::KStorage(std::shared_ptr<const std::vector<std::uint8_t>> romfs)
     : KObject(KernelObjectKind::Storage), romfs_(std::move(romfs)) {
@@ -582,12 +585,12 @@ CmifResponse HorizonKernel::dispatch_audio_manager(
 
     if (request.command_id == 0U) {
         const IpcBufferDescriptor* destination = find_receive_buffer(request);
-        if (destination == nullptr || destination->size < 9U) {
+        if (destination == nullptr || destination->size < 10U) {
             response.result = kInvalidArgument;
             return response;
         }
         const std::vector<std::uint8_t> name{
-            'D', 'e', 'v', 'i', 'c', 'e', 'O', 'u', 't'
+            'D', 'e', 'v', 'i', 'c', 'e', 'O', 'u', 't', 0U
         };
         try {
             memory_.write(destination->address, name);
