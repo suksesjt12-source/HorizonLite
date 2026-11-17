@@ -80,7 +80,7 @@ int main() {
     const bool cleared = audio.queued_bytes() == 0U;
     if (!queued || !cleared) {
         std::cerr << "SDL2 audio queue test failed; queued="
-                  << queued << " cleared=" << cleared << '\\n';
+                  << queued << " cleared=" << cleared << '\n';
         return 1;
     }
 
