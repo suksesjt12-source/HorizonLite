@@ -2,6 +2,7 @@
 #include "horizon/cpu.hpp"
 #include "horizon/display.hpp"
 #include "horizon/kernel.hpp"
+#include "horizon/loader_config.hpp"
 #include "horizon/nro_loader.hpp"
 #include "horizon/romfs.hpp"
 
@@ -17,6 +18,7 @@
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -44,6 +46,10 @@ constexpr std::uint64_t kPcmBufferAddress = 0x22000000ULL;
 constexpr std::uint64_t kAudioBufferHeaderAddress = 0x22010000ULL;
 constexpr std::uint64_t kAudioReleasedArrayAddress = 0x22011000ULL;
 constexpr std::uint64_t kStage6ScratchAddress = 0x23000000ULL;
+constexpr std::uint64_t kNroLoadBase = 0x01000000ULL;
+constexpr std::uint64_t kLoaderConfigAddress = 0x3F000000ULL;
+constexpr std::size_t kLoaderConfigRegionSize = 0x1000U;
+constexpr std::uint64_t kLoaderHeapCapacity = 0x08000000ULL;
 constexpr std::uint64_t kWorkerThreadTextAddress = 0x00108000ULL;
 constexpr std::uint64_t kSharedThreadDataOffset = 0x00900000ULL;
 constexpr std::uint32_t kMainThreadHandle = 0x101U;
@@ -1175,12 +1181,34 @@ LoadedProgram load_program(const Options& options,
     }
 
     const auto file = horizon::NroLoader::read_file(*options.nro_path);
-    const horizon::NroImage image = horizon::NroLoader::load(file, memory);
+    const horizon::NroImage image = horizon::NroLoader::load(
+        file, memory, kNroLoadBase);
     std::cout << "Loaded NRO0 image: " << *options.nro_path << '\n'
               << "  Declared size: 0x" << std::hex << image.declared_size << '\n'
               << "  Entry point:   0x" << image.entry_point << std::dec << '\n'
               << "  ASET RomFS:    " << image.romfs.size() << " bytes\n";
     return LoadedProgram{image.entry_point, image.romfs, false};
+}
+
+bool verify_loader_config(const horizon::AddressSpace& memory,
+                           std::uint64_t address,
+                           std::uint64_t thread_handle,
+                           std::uint64_t heap_address,
+                           std::uint64_t heap_size) {
+    constexpr std::array<std::uint32_t, 6> expected_keys{1U, 3U, 7U, 10U, 14U, 0U};
+    for (std::size_t index = 0U; index < expected_keys.size(); ++index) {
+        const std::uint64_t entry = address + index * sizeof(horizon::LoaderConfigEntry);
+        if (memory.read_u32(entry) != expected_keys[index] ||
+            memory.read_u32(entry + 4U) != 0U)
+            return false;
+    }
+    return memory.read_u64(address + 8U) == thread_handle &&
+           memory.read_u64(address + 24U + 8U) == heap_address &&
+           memory.read_u64(address + 24U + 16U) == heap_size &&
+           memory.read_u64(address + 48U + 8U) == 0U &&
+           memory.read_u64(address + 72U + 8U) == 0xFFFF8001ULL &&
+           memory.read_u64(address + 96U + 8U) != 0U &&
+           memory.read_u64(address + 96U + 16U) != 0U;
 }
 
 void verify_self_test(const horizon::AddressSpace& memory,
