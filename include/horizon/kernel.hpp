@@ -391,6 +391,7 @@ private:
     std::size_t next_thread_index_{1U};
     std::size_t scheduler_cursor_{};
     bool scheduler_initialized_{};
+    bool applet_exit_requested_{};
     bool scheduler_yield_requested_{};
     std::uint64_t sampling_number_{};
     std::uint64_t heap_size_{};
