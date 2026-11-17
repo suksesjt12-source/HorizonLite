@@ -1,3 +1,4 @@
+#include "horizon/audio.hpp"
 #include "horizon/cpu.hpp"
 #include "horizon/display.hpp"
 #include "horizon/kernel.hpp"
@@ -37,6 +38,9 @@ constexpr std::uint64_t kSelfTestTextAddress = 0x00100000ULL;
 constexpr std::uint64_t kSelfTestStringsAddress = 0x00110000ULL;
 constexpr std::uint64_t kHidMappingAddress = 0x20000000ULL;
 constexpr std::uint64_t kSpriteBufferAddress = 0x21000000ULL;
+constexpr std::uint64_t kPcmBufferAddress = 0x22000000ULL;
+constexpr std::uint64_t kAudioBufferHeaderAddress = 0x22010000ULL;
+constexpr std::uint64_t kAudioReleasedArrayAddress = 0x22011000ULL;
 constexpr std::uint64_t kStopAddress = std::numeric_limits<std::uint64_t>::max();
 constexpr std::size_t kInteractiveInstructionBudget = 180000U;
 constexpr std::size_t kHeadlessInstructionLimit = 1000000U;
@@ -55,6 +59,15 @@ public:
     void movz(unsigned rd, std::uint16_t immediate, unsigned shift = 0U) {
         emit(0xD2800000U | ((shift / 16U) << 21U) |
              (static_cast<std::uint32_t>(immediate) << 5U) | rd);
+    }
+
+    void movn_w(unsigned rd, std::uint16_t immediate) {
+        emit(0x12800000U |
+             (static_cast<std::uint32_t>(immediate) << 5U) | rd);
+    }
+
+    void eor_reg(unsigned rd, unsigned rn, unsigned rm) {
+        emit(0xCA000000U | (rm << 16U) | (rn << 5U) | rd);
     }
 
     void movk(unsigned rd, std::uint16_t immediate, unsigned shift = 0U) {
@@ -111,6 +124,10 @@ public:
 
     void str_w(unsigned rt, unsigned rn, unsigned offset) {
         emit(0xB9000000U | ((offset / 4U) << 10U) | (rn << 5U) | rt);
+    }
+
+    void strh(unsigned rt, unsigned rn, unsigned offset) {
+        emit(0x79000000U | ((offset / 2U) << 10U) | (rn << 5U) | rt);
     }
 
     void ldr_w(unsigned rt, unsigned rn, unsigned offset) {
@@ -198,7 +215,9 @@ enum class IpcDescriptorKind {
     None,
     Pointer,
     Send,
-    Receive
+    Receive,
+    AutoSend,
+    AutoReceive
 };
 
 void emit_cmif_request(A64Assembler& a, unsigned command_id,
@@ -211,10 +230,12 @@ void emit_cmif_request(A64Assembler& a, unsigned command_id,
     if (descriptor_kind == IpcDescriptorKind::Pointer) {
         header0 |= 1U << 16U;
         descriptor_bytes = 8U;
-    } else if (descriptor_kind == IpcDescriptorKind::Send) {
+    } else if (descriptor_kind == IpcDescriptorKind::Send ||
+               descriptor_kind == IpcDescriptorKind::AutoSend) {
         header0 |= 1U << 20U;
         descriptor_bytes = 12U;
-    } else if (descriptor_kind == IpcDescriptorKind::Receive) {
+    } else if (descriptor_kind == IpcDescriptorKind::Receive ||
+               descriptor_kind == IpcDescriptorKind::AutoReceive) {
         header0 |= 1U << 24U;
         descriptor_bytes = 12U;
     }
@@ -238,12 +259,17 @@ void emit_cmif_request(A64Assembler& a, unsigned command_id,
         a.mov64(0U, descriptor_address);
         a.str_w(0U, 20U, 12U);
     } else if (descriptor_kind == IpcDescriptorKind::Send ||
-               descriptor_kind == IpcDescriptorKind::Receive) {
+               descriptor_kind == IpcDescriptorKind::Receive ||
+               descriptor_kind == IpcDescriptorKind::AutoSend ||
+               descriptor_kind == IpcDescriptorKind::AutoReceive) {
         a.mov64(0U, static_cast<std::uint32_t>(descriptor_size));
         a.str_w(0U, 20U, 8U);
         a.mov64(0U, static_cast<std::uint32_t>(descriptor_address));
         a.str_w(0U, 20U, 12U);
-        a.movz(0U, 0U);
+        const std::uint32_t descriptor_type =
+            descriptor_kind == IpcDescriptorKind::AutoSend ? 0x21U :
+            descriptor_kind == IpcDescriptorKind::AutoReceive ? 0x22U : 0U;
+        a.movz(0U, static_cast<std::uint16_t>(descriptor_type));
         a.str_w(0U, 20U, 16U);
     }
 
