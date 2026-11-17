@@ -108,10 +108,11 @@ NroImage NroLoader::parse(const std::vector<std::uint8_t>& file) {
         throw std::runtime_error("prototype expects a non-empty .text segment starting at file offset 0");
 
     for (const NroSegment& segment : image.segments) {
-        const std::uint64_t end =
+        const std::uint64_t payload_end =
+            static_cast<std::uint64_t>(kMinimumNroSize) +
             static_cast<std::uint64_t>(segment.file_offset) + segment.size;
-        if (end > image.declared_size)
-            throw std::runtime_error("NRO segment extends beyond the declared NRO image");
+        if (payload_end > image.declared_size)
+            throw std::runtime_error("NRO segment extends beyond the declared payload");
     }
     for (std::size_t i = 0; i < image.segments.size(); ++i) {
         for (std::size_t j = i + 1U; j < image.segments.size(); ++j) {
@@ -120,7 +121,7 @@ NroImage NroLoader::parse(const std::vector<std::uint8_t>& file) {
         }
     }
 
-    image.entry_point = kMinimumNroSize;
+    image.entry_point = image.segments[0].file_offset;
     extract_romfs_asset(file, image);
     return image;
 }
@@ -143,7 +144,12 @@ NroImage NroLoader::load(const std::vector<std::uint8_t>& file,
         if (segment.size == 0U) continue;
         if (segment.file_offset > std::numeric_limits<std::uint64_t>::max() - load_base)
             throw std::overflow_error("NRO segment address overflows");
-        const auto first = file.begin() + static_cast<std::ptrdiff_t>(segment.file_offset);
+        const std::uint64_t file_offset =
+            static_cast<std::uint64_t>(kMinimumNroSize) + segment.file_offset;
+        if (file_offset > file.size() ||
+            segment.size > file.size() - file_offset)
+            throw std::runtime_error("NRO segment data is outside the file");
+        const auto first = file.begin() + static_cast<std::ptrdiff_t>(file_offset);
         const auto last = first + static_cast<std::ptrdiff_t>(segment.size);
         memory.map(load_base + segment.file_offset,
                    std::vector<std::uint8_t>(first, last), permissions[i]);
