@@ -388,7 +388,7 @@ void Arm64Cpu::step() {
         instruction & 0x3F7FFC00U;
     if (exclusive_load_class == 0x085F7C00U ||
         exclusive_load_class == 0x085FFC00U) {
-        const bool wide = (instruction >> 30U) != 0U;
+        const bool wide = ((instruction >> 30U) & 1U) != 0U;
         const unsigned rn = (instruction >> 5U) & 0x1FU;
         const unsigned rt = instruction & 0x1FU;
         const std::size_t access_size = wide ? 8U : 4U;
