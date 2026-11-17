@@ -43,6 +43,7 @@ add_executable(horizonlite_cpu_test
     src/cpu.cpp
     src/kernel.cpp
     src/audio.cpp
+    src/display.cpp
 )
 target_include_directories(horizonlite_cpu_test PRIVATE include)
 target_compile_features(horizonlite_cpu_test PRIVATE cxx_std_20)
