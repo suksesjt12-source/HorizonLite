@@ -290,6 +290,21 @@ private:
         const KClientSession& session, const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_storage(
         const KStorage& storage, const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_account(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_profile(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_system_settings(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_settings(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_file_system(
+        const std::shared_ptr<KFileSystem>& file_system,
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_file(
+        const std::shared_ptr<KFile>& file, const CmifRequest& request);
+    [[nodiscard]] std::filesystem::path resolve_save_path(
+        const std::filesystem::path& root, const std::string& guest_path) const;
     [[nodiscard]] CmifResponse dispatch_audio_manager(
         const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_nvdrv(
