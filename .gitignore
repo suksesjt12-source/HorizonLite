@@ -1,0 +1,6 @@
+/build/
+*.nro
+*.elf
+*.o
+*.obj
+.DS_Store
