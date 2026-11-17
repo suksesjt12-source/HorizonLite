@@ -396,18 +396,11 @@ CmifResponse HorizonKernel::dispatch_storage(
             return response;
         }
         try {
-            std::cerr << "[IStorage] Read offset=0x" << std::hex << offset
-                      << " size=0x" << size << " receive=0x" << destination.address
-                      << " capacity=0x" << destination.size << std::dec << '\\n';
             const auto first = storage.romfs().begin() +
                 static_cast<std::ptrdiff_t>(offset);
             const auto last = first + static_cast<std::ptrdiff_t>(size);
             std::vector<std::uint8_t> bytes(first, last);
             memory_.write(destination.address, bytes);
-            std::cerr << "[IStorage] copied first words 0x" << std::hex
-                      << memory_.read_u32(destination.address) << " 0x"
-                      << memory_.read_u32(destination.address + 68U)
-                      << std::dec << '\\n';
         } catch (const std::exception&) {
             response.result = kInvalidArgument;
         }
@@ -514,7 +507,7 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
         if (response.result != kSuccess) {
             std::cerr << "[HorizonKernel] IPC command " << request.command_id
                       << " returned 0x" << std::hex << response.result
-                      << std::dec << '\\n';
+                      << std::dec << '\n';
         }
         const std::vector<std::uint8_t> reply =
             CmifCodec::build_response(response, 0x100U);
@@ -524,7 +517,7 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
         state.x[0] = kSuccess;
     } catch (const std::exception& error) {
         std::cerr << "[HorizonKernel] svcSendSyncRequest failed: "
-                  << error.what() << '\\n';
+                  << error.what() << '\n';
         state.x[0] = kInvalidArgument;
     }
 }
