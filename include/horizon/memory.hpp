@@ -41,8 +41,12 @@ public:
         Permission access = Permission::Read) const;
     void write(std::uint64_t address, const std::vector<std::uint8_t>& bytes);
     void write_u8(std::uint64_t address, std::uint8_t value);
+    void write_u16(std::uint64_t address, std::uint16_t value);
     void write_u32(std::uint64_t address, std::uint32_t value);
     void write_u64(std::uint64_t address, std::uint64_t value);
+    [[nodiscard]] std::uint16_t read_u16(
+        std::uint64_t address,
+        Permission access = Permission::Read) const;
     [[nodiscard]] std::uint8_t read_u8(
         std::uint64_t address,
         Permission access = Permission::Read) const;
