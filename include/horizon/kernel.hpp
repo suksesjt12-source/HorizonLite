@@ -4,6 +4,7 @@
 #include "horizon/cpu.hpp"
 #include "horizon/memory.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -24,7 +25,9 @@ enum class KernelObjectKind : std::uint8_t {
     SharedMemory,
     Storage,
     Event,
-    AudioOut
+    AudioOut,
+    BinderDriver,
+    DisplayLayer
 };
 
 class KObject {
@@ -86,6 +89,41 @@ public:
     std::deque<std::uint64_t> released_buffers;
     std::uint64_t submitted_bytes{};
     bool started{};
+};
+
+struct NvMapBuffer {
+    std::uint32_t handle{};
+    std::uint32_t id{};
+    std::uint64_t size{};
+    std::uint64_t guest_address{};
+    std::uint64_t alignment{0x1000U};
+    std::uint32_t heap_mask{};
+    std::uint32_t flags{};
+    bool allocated{};
+};
+
+struct DisplayBufferSlot {
+    std::uint32_t nvmap_handle{};
+    std::uint64_t offset{};
+    bool configured{};
+};
+
+class KDisplayLayer final : public KObject {
+public:
+    KDisplayLayer();
+
+    std::array<DisplayBufferSlot, 2> slots{};
+    std::vector<std::uint8_t> presented_rgba;
+    std::shared_ptr<KEvent> vsync_event;
+    std::shared_ptr<KEvent> release_event;
+    std::uint32_t next_dequeue_slot{};
+    std::uint64_t frame_number{};
+};
+
+class KHOSBinderDriver final : public KObject {
+public:
+    explicit KHOSBinderDriver(std::shared_ptr<KDisplayLayer> layer);
+    std::shared_ptr<KDisplayLayer> layer;
 };
 
 class HandleTable {
@@ -166,6 +204,9 @@ public:
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] const HandleTable& handles() const noexcept;
     [[nodiscard]] std::size_t romfs_size() const noexcept;
+    [[nodiscard]] std::span<const std::uint8_t> display_pixels() const noexcept;
+    [[nodiscard]] std::uint64_t display_frame_number() const noexcept;
+    void signal_vsync() noexcept;
 
 private:
     struct SharedMapping {
@@ -179,6 +220,15 @@ private:
     [[nodiscard]] CmifResponse dispatch_storage(
         const KStorage& storage, const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_audio_manager(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_nvdrv(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_display_root(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_display_service(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_hos_binder(
+        const std::shared_ptr<KHOSBinderDriver>& binder,
         const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_audio_out(
         const std::shared_ptr<KAudioOut>& audio_out,
@@ -209,6 +259,12 @@ private:
     std::shared_ptr<const std::vector<std::uint8_t>> romfs_;
     SdlAudioOutput& audio_device_;
     std::vector<std::weak_ptr<KAudioOut>> audio_sessions_;
+    std::unordered_map<std::int32_t, std::string> nv_devices_;
+    std::unordered_map<std::uint32_t, NvMapBuffer> nvmap_buffers_;
+    std::shared_ptr<KDisplayLayer> display_layer_;
+    std::int32_t next_nv_fd_{3};
+    std::uint32_t next_nvmap_handle_{1U};
+    std::uint32_t next_nvmap_id_{1U};
     std::unordered_map<Handle, SharedMapping> shared_mappings_;
     std::uint64_t sampling_number_{};
     std::uint64_t heap_size_{};
