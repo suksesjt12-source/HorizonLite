@@ -748,10 +748,7 @@ CmifResponse HorizonKernel::dispatch_nvdrv(
             if (input_bytes.size() < 4U) {
                 error = kInvalidArgument;
             } else {
-                std::uint32_t requested_size = input_bytes.size() >= 8U
-                    ? read_le32(input_bytes, 4U) : read_le32(input_bytes, 0U);
-                if (requested_size == 0U && input_bytes.size() >= 4U)
-                    requested_size = read_le32(input_bytes, 0U);
+                const std::uint32_t requested_size = read_le32(input_bytes, 0U);
                 if (requested_size == 0U || requested_size > 0x20000000U ||
                     next_nvmap_handle_ == 0U || next_nvmap_id_ == 0U) {
                     error = kInvalidArgument;
@@ -762,8 +759,8 @@ CmifResponse HorizonKernel::dispatch_nvdrv(
                     buffer.size = requested_size;
                     nvmap_buffers_.emplace(buffer.handle, buffer);
                     if (out.size() < 8U) out.resize(8U, 0U);
-                    write_le32(out, 0U, buffer.handle);
-                    write_le32(out, 4U, requested_size);
+                    write_le32(out, 0U, requested_size);
+                    write_le32(out, 4U, buffer.handle);
                 }
             }
         } else if (ioctl_code == kNvMapAlloc) {
