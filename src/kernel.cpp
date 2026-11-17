@@ -1461,6 +1461,330 @@ void HorizonKernel::svc_close_handle(CpuState& state) {
         ? kSuccess : kInvalidHandle;
 }
 
+void HorizonKernel::initialize_scheduler(const CpuState& initial_context) {
+    if (scheduler_initialized_) return;
+    auto main = std::make_shared<KThread>(0U);
+    main->context = initial_context;
+    main->context.exclusive_monitor.clear();
+    main->status = ThreadStatus::Runnable;
+    main->priority = 0x2CU;
+    main->processor_id = -1;
+    main->handle = handles_.insert(main);
+    threads_.push_back(main);
+    main_thread_ = std::move(main);
+    active_thread_.reset();
+    scheduler_cursor_ = 0U;
+    next_thread_index_ = 1U;
+    scheduler_initialized_ = true;
+    scheduler_yield_requested_ = false;
+}
+
+std::size_t HorizonKernel::run_scheduler(
+    Arm64Cpu& cpu, std::size_t max_instructions,
+    std::uint64_t stop_pc, std::size_t time_slice) {
+    if (!scheduler_initialized_) initialize_scheduler(cpu.state());
+    if (time_slice == 0U) time_slice = 750U;
+
+    std::size_t executed_total = 0U;
+    std::size_t idle_rounds = 0U;
+    while (running_ && executed_total < max_instructions) {
+        update_thread_waiters();
+        update_audio_events();
+
+        std::shared_ptr<KThread> thread = next_runnable_thread();
+        if (!thread) {
+            const bool has_blocked_threads = std::any_of(
+                threads_.begin(), threads_.end(),
+                [](const std::shared_ptr<KThread>& item) {
+                    return item->status == ThreadStatus::Sleeping ||
+                           item->status == ThreadStatus::WaitingSynchronization ||
+                           item->status == ThreadStatus::WaitingLock;
+                });
+            if (!has_blocked_threads || idle_rounds++ >= 100U) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        idle_rounds = 0U;
+
+        active_thread_ = thread;
+        scheduler_yield_requested_ = false;
+        thread->context.exclusive_monitor.clear();
+        cpu.state() = thread->context;
+        const std::size_t slice = std::min(
+            time_slice, max_instructions - executed_total);
+        const std::size_t executed = cpu.run(slice, stop_pc);
+        executed_total += executed;
+        thread->context = cpu.state();
+        thread->context.exclusive_monitor.clear();
+
+        if (thread->status == ThreadStatus::Runnable &&
+            thread->context.pc == stop_pc) {
+            thread->status = ThreadStatus::Terminated;
+        }
+        active_thread_.reset();
+        scheduler_yield_requested_ = false;
+
+        if (executed == 0U && thread->status == ThreadStatus::Runnable)
+            break;
+    }
+    return executed_total;
+}
+
+std::shared_ptr<KThread> HorizonKernel::find_thread(Handle handle) const noexcept {
+    const auto found = std::find_if(
+        threads_.begin(), threads_.end(),
+        [handle](const std::shared_ptr<KThread>& thread) {
+            return thread->handle == handle &&
+                   thread->status != ThreadStatus::Terminated;
+        });
+    return found == threads_.end() ? nullptr : *found;
+}
+
+std::shared_ptr<KThread> HorizonKernel::next_runnable_thread() {
+    if (threads_.empty()) return nullptr;
+    for (std::size_t attempt = 0U; attempt < threads_.size(); ++attempt) {
+        const std::size_t index =
+            (scheduler_cursor_ + attempt) % threads_.size();
+        const auto& thread = threads_[index];
+        if (thread->status == ThreadStatus::Runnable) {
+            scheduler_cursor_ = (index + 1U) % threads_.size();
+            return thread;
+        }
+    }
+    return nullptr;
+}
+
+bool HorizonKernel::any_runnable_thread() const noexcept {
+    return std::any_of(threads_.begin(), threads_.end(),
+        [](const std::shared_ptr<KThread>& thread) {
+            return thread->status == ThreadStatus::Runnable;
+        });
+}
+
+void HorizonKernel::request_scheduler_yield() noexcept {
+    scheduler_yield_requested_ = true;
+}
+
+void HorizonKernel::reset_all_exclusive_monitors() noexcept {
+    for (const auto& thread : threads_)
+        thread->context.exclusive_monitor.clear();
+    if (active_thread_)
+        active_thread_->context.exclusive_monitor.clear();
+}
+
+void HorizonKernel::update_thread_waiters() {
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& thread : threads_) {
+        if (thread->status == ThreadStatus::Sleeping) {
+            if (!thread->has_deadline || now >= thread->wake_deadline) {
+                thread->status = ThreadStatus::Runnable;
+                thread->has_deadline = false;
+                thread->context.x[0] = kSuccess;
+            }
+            continue;
+        }
+        if (thread->status != ThreadStatus::WaitingSynchronization) continue;
+
+        bool woke = false;
+        for (std::size_t index = 0U; index < thread->waiting_handles.size(); ++index) {
+            const auto object = handles_.get(thread->waiting_handles[index]);
+            if (!object) {
+                thread->context.x[0] = kInvalidHandle;
+                thread->context.x[1] = 0U;
+                woke = true;
+                break;
+            }
+            if (object->kind() == KernelObjectKind::Event &&
+                std::static_pointer_cast<KEvent>(object)->signaled) {
+                thread->context.x[0] = kSuccess;
+                thread->context.x[1] = index;
+                woke = true;
+                break;
+            }
+        }
+        if (!woke && thread->has_deadline && now >= thread->wake_deadline) {
+            thread->context.x[0] = 0xEA01U;
+            thread->context.x[1] = 0U;
+            woke = true;
+        }
+        if (woke) {
+            thread->waiting_handles.clear();
+            thread->has_deadline = false;
+            thread->status = ThreadStatus::Runnable;
+        }
+    }
+}
+
+void HorizonKernel::svc_create_thread(CpuState& state) {
+    const std::uint64_t entry_pc = state.x[1];
+    const std::uint64_t argument = state.x[2];
+    const std::uint64_t stack_top = state.x[3];
+    const std::int32_t priority = static_cast<std::int32_t>(state.x[4]);
+    const std::int32_t processor_id = static_cast<std::int32_t>(state.x[5]);
+    if (!scheduler_initialized_ || entry_pc == 0U ||
+        stack_top < 16U || (stack_top & 0xFU) != 0U ||
+        priority < 0 || priority > 0x3FU ||
+        (processor_id < -1 || processor_id > 3) ||
+        next_thread_index_ >= 0x10000U) {
+        state.x[0] = kInvalidArgument;
+        state.x[1] = 0U;
+        return;
+    }
+
+    try {
+        (void)memory_.view(entry_pc, 4U, Permission::Execute);
+        (void)memory_.view(stack_top - 16U, 16U, Permission::Write);
+        const std::uint64_t tls_address =
+            0x10000000ULL + static_cast<std::uint64_t>(next_thread_index_) * 0x1000ULL;
+        memory_.map_zeroed(tls_address, 0x1000U,
+                           Permission::Read | Permission::Write);
+
+        auto thread = std::make_shared<KThread>(next_thread_index_++);
+        thread->context = CpuState{};
+        thread->context.x[0] = argument;
+        thread->context.sp = stack_top;
+        thread->context.pc = entry_pc;
+        thread->context.tpidrro_el0 = tls_address;
+        thread->context.exclusive_monitor.clear();
+        thread->status = ThreadStatus::Suspended;
+        thread->priority = priority;
+        thread->processor_id = processor_id;
+        thread->handle = handles_.insert(thread);
+        threads_.push_back(thread);
+        state.x[0] = kSuccess;
+        state.x[1] = thread->handle;
+    } catch (const std::exception&) {
+        state.x[0] = kInvalidArgument;
+        state.x[1] = 0U;
+    }
+}
+
+void HorizonKernel::svc_start_thread(CpuState& state) {
+    const Handle handle = static_cast<Handle>(state.x[0]);
+    const auto thread = find_thread(handle);
+    if (!thread || thread->status != ThreadStatus::Suspended) {
+        state.x[0] = kInvalidHandle;
+        return;
+    }
+    thread->status = ThreadStatus::Runnable;
+    state.x[0] = kSuccess;
+}
+
+void HorizonKernel::svc_exit_thread(CpuState& state) noexcept {
+    if (!active_thread_) {
+        state.x[0] = kInvalidHandle;
+        return;
+    }
+    active_thread_->status = ThreadStatus::Terminated;
+    active_thread_->waiting_handles.clear();
+    active_thread_->has_deadline = false;
+    state.x[0] = kSuccess;
+    state.exclusive_monitor.clear();
+    request_scheduler_yield();
+}
+
+void HorizonKernel::svc_sleep_thread(CpuState& state) {
+    if (!active_thread_) {
+        state.x[0] = kInvalidArgument;
+        return;
+    }
+    const std::int64_t nanoseconds =
+        static_cast<std::int64_t>(state.x[0]);
+    if (nanoseconds <= 0) {
+        state.x[0] = kSuccess;
+        request_scheduler_yield();
+        return;
+    }
+    active_thread_->status = ThreadStatus::Sleeping;
+    active_thread_->wake_deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::nanoseconds(nanoseconds);
+    active_thread_->has_deadline = true;
+    state.x[0] = kSuccess;
+    state.exclusive_monitor.clear();
+    request_scheduler_yield();
+}
+
+void HorizonKernel::svc_arbitrate_lock(CpuState& state) {
+    const Handle owner_handle = static_cast<Handle>(state.x[0]);
+    const std::uint64_t mutex_address = state.x[1];
+    const Handle requester_handle = static_cast<Handle>(state.x[2]);
+    if ((mutex_address & 3U) != 0U) {
+        state.x[0] = kInvalidArgument;
+        return;
+    }
+    try {
+        const std::uint32_t mutex_value =
+            memory_.read_u32(mutex_address, Permission::Read);
+        const std::uint32_t owner_value = mutex_value & 0x3FFFFFFFU;
+        if (owner_value != owner_handle) {
+            state.x[0] = kSuccess;
+            return;
+        }
+        const auto requester = find_thread(requester_handle);
+        if (!requester || requester->status == ThreadStatus::Terminated) {
+            state.x[0] = kInvalidHandle;
+            return;
+        }
+        requester->status = ThreadStatus::WaitingLock;
+        requester->waiting_mutex = mutex_address;
+        requester->context.exclusive_monitor.clear();
+        state.x[0] = kSuccess;
+        state.exclusive_monitor.clear();
+        if (active_thread_ == requester) request_scheduler_yield();
+    } catch (const std::exception&) {
+        state.x[0] = kInvalidArgument;
+    }
+}
+
+void HorizonKernel::svc_arbitrate_unlock(CpuState& state) {
+    const std::uint64_t mutex_address = state.x[0];
+    if ((mutex_address & 3U) != 0U) {
+        state.x[0] = kInvalidArgument;
+        return;
+    }
+    try {
+        (void)memory_.read_u32(mutex_address, Permission::Read);
+        std::shared_ptr<KThread> next_owner;
+        std::size_t waiting_count = 0U;
+        for (const auto& thread : threads_) {
+            if (thread->status == ThreadStatus::WaitingLock &&
+                thread->waiting_mutex == mutex_address) {
+                ++waiting_count;
+                if (!next_owner) next_owner = thread;
+            }
+        }
+        if (!next_owner) {
+            memory_.write_u32(mutex_address, 0U);
+        } else {
+            next_owner->status = ThreadStatus::Runnable;
+            next_owner->waiting_mutex = 0U;
+            const bool has_more_waiters = waiting_count > 1U;
+            const std::uint32_t new_value = next_owner->handle |
+                (has_more_waiters ? 0x40000000U : 0U);
+            memory_.write_u32(mutex_address, new_value);
+        }
+        reset_all_exclusive_monitors();
+        state.exclusive_monitor.clear();
+        state.x[0] = kSuccess;
+    } catch (const std::exception&) {
+        state.x[0] = kInvalidArgument;
+    }
+}
+
+std::size_t HorizonKernel::scheduled_thread_count() const noexcept {
+    return threads_.size();
+}
+
+Handle HorizonKernel::current_thread_handle() const noexcept {
+    return active_thread_ ? active_thread_->handle :
+        (main_thread_ ? main_thread_->handle : 0U);
+}
+
+bool HorizonKernel::yield_requested() const noexcept {
+    return scheduler_yield_requested_;
+}
+
 void HorizonKernel::update_hid_input(std::uint64_t buttons) {
     ++sampling_number_;
     auto& bytes = hid_shared_memory_->bytes;
