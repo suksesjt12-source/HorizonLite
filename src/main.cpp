@@ -1107,7 +1107,8 @@ void initialize_machine_memory(horizon::AddressSpace& memory) {
                       horizon::Permission::Read | horizon::Permission::Write);
     memory.map_zeroed(kPcmBufferAddress, 0x20000U,
                       horizon::Permission::Read | horizon::Permission::Write);
-
+    memory.map_zeroed(kLoaderConfigAddress, kLoaderConfigRegionSize,
+                      horizon::Permission::Read | horizon::Permission::Write);
 }
 
 std::uint64_t load_self_test(horizon::AddressSpace& memory) {
@@ -1186,6 +1187,8 @@ LoadedProgram load_program(const Options& options,
     std::cout << "Loaded NRO0 image: " << *options.nro_path << '\n'
               << "  Declared size: 0x" << std::hex << image.declared_size << '\n'
               << "  Entry point:   0x" << image.entry_point << std::dec << '\n'
+              << "  BSS:           0x" << std::hex << image.bss_base << "+0x"
+              << image.bss_size << std::dec << " bytes\n"
               << "  ASET RomFS:    " << image.romfs.size() << " bytes\n";
     return LoadedProgram{image.entry_point, image.romfs, false};
 }
@@ -1271,6 +1274,7 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         const std::size_t executed =
             kernel.run_scheduler(cpu, kHeadlessInstructionLimit, kStopAddress);
         std::cout << "Executed guest instructions: " << executed << '\n';
+        kernel.print_ipc_statistics();
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         kernel.update_audio_events();
         verify_self_test(memory, kernel.display_pixels(),
@@ -1281,6 +1285,7 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
     const std::size_t executed =
         kernel.run_scheduler(cpu, 20000000U, kStopAddress);
     std::cout << "Executed instructions: " << executed << '\n';
+    kernel.print_ipc_statistics();
     if (kernel.running()) {
         std::cerr << "Execution reached the headless instruction limit.\n";
         return 3;
@@ -1292,15 +1297,25 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel) {
     horizon::SdlDisplay display;
     constexpr auto frame_duration = std::chrono::microseconds(16667);
     bool keep_open = true;
-    while (keep_open) {
+    std::size_t executed_total = 0U;
+    while (keep_open && kernel.running()) {
         const auto frame_start = std::chrono::steady_clock::now();
         keep_open = display.process_events();
-        if (!keep_open) break;
+        if (!keep_open) {
+            kernel.request_applet_exit();
+            const std::size_t cleanup_instructions =
+                kernel.run_scheduler(cpu, 500000U, kStopAddress, 750U);
+            executed_total += cleanup_instructions;
+            if (kernel.running())
+                std::cout << "SDL2 close: applet ExitRequest was queued; "
+                             "guest did not exit within the cleanup instruction budget.\\n";
+            break;
+        }
 
         kernel.update_hid_input(display.read_controller_buttons());
         kernel.update_audio_events();
         if (kernel.running())
-            (void)kernel.run_scheduler(
+            executed_total += kernel.run_scheduler(
                 cpu, kInteractiveInstructionBudget, kStopAddress, 750U);
         kernel.update_audio_events();
         display.render(kernel.display_pixels(),
@@ -1308,6 +1323,8 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel) {
         kernel.signal_vsync();
         std::this_thread::sleep_until(frame_start + frame_duration);
     }
+    std::cout << "Executed guest instructions: " << executed_total << '\\n';
+    kernel.print_ipc_statistics();
     return 0;
 }
 
@@ -1327,6 +1344,32 @@ int main(int argc, char** argv) {
         cpu.state().pc = program.entry_point;
         cpu.state().sp = kStackAddress + kStackSize - 16U;
         cpu.state().tpidrro_el0 = kTlsAddress;
+
+        kernel.prepare_loader_heap(kLoaderHeapCapacity);
+        kernel.initialize_scheduler(cpu.state());
+
+        std::random_device random_source;
+        horizon::LoaderConfigValues loader_values;
+        loader_values.main_thread_handle = kernel.current_thread_handle();
+        loader_values.heap_address = kernel.loader_heap_base();
+        loader_values.heap_size = kernel.loader_heap_size();
+        loader_values.random_seed[0] = horizon::make_random_seed(random_source);
+        loader_values.random_seed[1] = horizon::make_random_seed(random_source);
+        horizon::write_loader_config(memory, kLoaderConfigAddress, loader_values);
+
+        cpu.state().x[0] = kLoaderConfigAddress;
+        cpu.state().x[1] = std::numeric_limits<std::uint64_t>::max();
+        kernel.update_main_thread_context(cpu.state());
+
+        if (program.self_test) {
+            if (!verify_loader_config(memory, kLoaderConfigAddress,
+                    kernel.current_thread_handle(), kernel.loader_heap_base(),
+                    kernel.loader_heap_size()))
+                throw std::runtime_error("LoaderConfig self-test failed");
+            if (!kernel.validate_stage9_services())
+                throw std::runtime_error("appletOE/time:u self-test failed");
+            std::cout << "LoaderConfig + appletOE + time:u self-test passed\\n";
+        }
 
         if (options.headless)
             return run_headless(cpu, kernel, memory, program.self_test);
