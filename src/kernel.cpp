@@ -674,6 +674,8 @@ CmifResponse HorizonKernel::dispatch_file_system(
     const CmifRequest& request) {
     CmifResponse response;
     response.command_id = request.command_id;
+    std::cerr << "[SaveData] IFileSystem command=" << request.command_id
+              << " root=" << file_system->root.string() << '\\n';
     const auto read_path = [this, &request]() {
         const IpcBufferDescriptor* descriptor = nullptr;
         if (!request.pointer_buffers.empty())
@@ -697,6 +699,7 @@ CmifResponse HorizonKernel::dispatch_file_system(
                 return response;
             }
             const auto target = resolve_save_path(file_system->root, read_path());
+            std::cerr << "[SaveData] CreateFile target=" << target.string() << '\\n';
             if (std::filesystem::exists(target)) {
                 response.result = 0x202U;
                 return response;
@@ -743,6 +746,8 @@ CmifResponse HorizonKernel::dispatch_file_system(
                 return response;
             }
             const auto target = resolve_save_path(file_system->root, read_path());
+            std::cerr << "[SaveData] OpenFile target=" << target.string()
+                      << " exists=" << std::filesystem::exists(target) << '\\n';
             if (!std::filesystem::is_regular_file(target)) {
                 response.result = 0x202U;
                 return response;
