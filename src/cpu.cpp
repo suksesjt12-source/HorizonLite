@@ -237,7 +237,7 @@ void Arm64Cpu::step() {
         return;
     }
 
-    if ((instruction & 0x7F800000U) == 0x53000000U) {
+    const std::uint32_t bitfield_class = instruction & 0x7F800000U;\n    if (bitfield_class == 0x53000000U || bitfield_class == 0x53400000U) {
         const unsigned width = (instruction >> 31U) != 0U ? 64U : 32U;
         const unsigned immr = (instruction >> 16U) & 0x3FU;
         const unsigned imms = (instruction >> 10U) & 0x3FU;
