@@ -1047,7 +1047,7 @@ CmifResponse HorizonKernel::dispatch_applet_service(
     }
     if (service_name.starts_with("generic_stub:")) {
         std::cout << "[GenericStubService] " << service_name.substr(13U)
-                  << " command " << request.command_id << " -> success\\n";
+                  << " command " << request.command_id << " -> success\n";
         return response;
     }
 
@@ -1219,16 +1219,16 @@ bool HorizonKernel::validate_stage9_services() {
 }
 
 void HorizonKernel::print_ipc_statistics() const {
-    std::cout << "IPC services accessed:\\n";
+    std::cout << "IPC services accessed:\n";
     if (ipc_accessed_.empty()) {
-        std::cout << "  (none)\\n";
+        std::cout << "  (none)\n";
         return;
     }
     for (const auto& [service, commands] : ipc_accessed_) {
         std::cout << "  " << service << ":";
         for (const std::uint32_t command : commands)
             std::cout << " " << command;
-        std::cout << '\\n';
+        std::cout << '\n';
     }
 }
 
@@ -1247,15 +1247,28 @@ CmifResponse HorizonKernel::dispatch_cmif(
                 response.result = kInvalidArgument;
                 return response;
             }
-            if (service_name != "hid" && service_name != "fsp-srv" &&
-                service_name != "audout:u" && service_name != "nvdrv" &&
-                service_name != "vi:m" && service_name != "acc:u0" &&
-                service_name != "set:sys" && service_name != "set") {
-                response.result = kInvalidArgument;
+            const bool optional_stub =
+                service_name == "apm" || service_name == "psm" ||
+                service_name == "bpc" || service_name == "spl:" ||
+                service_name == "hid:dbg";
+            const bool implemented =
+                service_name == "hid" || service_name == "fsp-srv" ||
+                service_name == "audout:u" || service_name == "nvdrv" ||
+                service_name == "vi:m" || service_name == "acc:u0" ||
+                service_name == "set:sys" || service_name == "set" ||
+                service_name == "appletOE" || service_name == "time:u" ||
+                service_name == "time:s" || service_name == "time:a";
+            if (!implemented && !optional_stub) {
+                response.result = MakeResult(1U, 2U);
                 return response;
             }
+            if (optional_stub)
+                std::cout << "[SM] optional service " << service_name
+                          << " routed to GenericStubService\\n";
+            const std::string resolved_name = optional_stub
+                ? "generic_stub:" + service_name : service_name;
             response.handle = handles_.insert(
-                std::make_shared<KClientSession>(service_name));
+                std::make_shared<KClientSession>(resolved_name));
             response.move_handle = true;
             return response;
         }
@@ -1290,6 +1303,19 @@ CmifResponse HorizonKernel::dispatch_cmif(
     if (session.service_name() == "audout:u") {
         return dispatch_audio_manager(request);
     }
+
+    if (session.service_name() == "appletOE" ||
+        session.service_name().starts_with("I") ||
+        session.service_name().starts_with("generic_stub:"))
+        return dispatch_applet_service(session.service_name(), request);
+
+    if (session.service_name() == "time:u" ||
+        session.service_name() == "time:s" ||
+        session.service_name() == "time:a" ||
+        session.service_name() == "ISystemClock" ||
+        session.service_name() == "ISteadyClock" ||
+        session.service_name() == "ITimeZoneService")
+        return dispatch_time_service(session.service_name(), request);
 
     if (session.service_name() == "acc:u0")
         return dispatch_account(request);
@@ -1389,6 +1415,12 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
         const CmifRequest request = CmifCodec::parse_request(command_buffer);
         CmifResponse response;
         if (object->kind() == KernelObjectKind::ClientSession) {
+            const std::string& service =
+                std::static_pointer_cast<KClientSession>(object)->service_name();
+            auto& commands = ipc_accessed_[service];
+            if (std::find(commands.begin(), commands.end(), request.command_id) ==
+                commands.end())
+                commands.push_back(request.command_id);
             response = dispatch_cmif(
                 *std::static_pointer_cast<KClientSession>(object), request);
         } else if (object->kind() == KernelObjectKind::Storage) {
