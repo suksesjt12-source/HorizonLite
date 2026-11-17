@@ -588,7 +588,14 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                   << " X19(X)=0x" << state.x[19]
                   << " X6=0x" << state.x[6]
                   << " X7=0x" << state.x[7]
+                  << " X0=0x" << state.x[0]
+                  << " X1=0x" << state.x[1]
+                  << " X3=0x" << state.x[3]
+                  << " X4=0x" << state.x[4]
+                  << " X8=0x" << state.x[8]
+                  << " X9=0x" << state.x[9]
                   << " X10=0x" << state.x[10]
+                  << " HID=0x" << memory.read_u64(kHidMappingAddress + 0x9A28U)
                   << std::dec << '\\n';
         const auto pixels = memory.view(kFramebufferAddress, kFramebufferBytes);
         constexpr std::array<std::uint8_t, 4> needle{0x42U, 0xB8U, 0xF0U, 0xFFU};
