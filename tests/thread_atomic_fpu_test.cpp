@@ -3,6 +3,7 @@
 #include "horizon/kernel.hpp"
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <iostream>
 #include <utility>
@@ -36,6 +37,8 @@ int main() {
             0xD2886425U, // MOVZ X5, #0x4321
             0xC806FC45U, // STLXR W6, X5, [X2]
             0xF9400047U, // LDR X7, [X2]
+            0xF9000C27U, // STR X7, [X1, #24]
+            0xB9001426U, // STR W6, [X1, #20]
             0xD2800145U, // MOVZ X5, #10
             0x1E2200A0U, // SCVTF S0, W5
             0x1E2C1001U, // FMOV S1, #0.5
@@ -86,13 +89,11 @@ int main() {
             memory.read_u32(0x20008U) == 1U &&
             memory.read_u32(0x2000CU) == 1U &&
             memory.read_u64(0x20010U) == 0x4321U &&
-            cpu.state().x[6] == 0U &&
-            cpu.state().x[7] == 0x4321U &&
+            memory.read_u32(0x20014U) == 0U &&
+            memory.read_u64(0x20018U) == 0x4321U &&
             !cpu.state().exclusive_monitor.valid;
 
         const bool single_fp_ok =
-            cpu.state().x[6] == 0U &&
-            cpu.state().x[7] == 0x4321U &&
             cpu.state().v[3] == std::bit_cast<std::uint32_t>(5.5F) &&
             cpu.state().v[4] == std::bit_cast<std::uint32_t>(5.5F);
         const bool double_fp_ok =
