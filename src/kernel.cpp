@@ -54,6 +54,11 @@ void write_le64(std::vector<std::uint8_t>& bytes, std::size_t offset,
         bytes[offset + i] = static_cast<std::uint8_t>(value >> (i * 8U));
 }
 
+void append_le32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    for (unsigned i = 0; i < 4U; ++i)
+        bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8U)));
+}
+
 void append_le64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
     for (unsigned i = 0; i < 8U; ++i)
         bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8U)));
@@ -109,6 +114,13 @@ const std::string& KClientSession::service_name() const noexcept {
 
 KSharedMemory::KSharedMemory(std::size_t size)
     : KObject(KernelObjectKind::SharedMemory), bytes(size, 0U) {}
+
+KEvent::KEvent() noexcept : KObject(KernelObjectKind::Event) {}
+
+KAudioOut::KAudioOut(SdlAudioOutput& output)
+    : KObject(KernelObjectKind::AudioOut),
+      device(output),
+      buffer_event(std::make_shared<KEvent>()) {}
 
 KStorage::KStorage(std::shared_ptr<const std::vector<std::uint8_t>> romfs)
     : KObject(KernelObjectKind::Storage), romfs_(std::move(romfs)) {
@@ -166,25 +178,37 @@ CmifRequest CmifCodec::parse_request(
 
     CmifRequest request;
     const auto read_descriptors = [&](std::size_t count, bool pointer,
-                                      std::vector<IpcBufferDescriptor>& output) {
+                                      std::vector<IpcBufferDescriptor>& output,
+                                      std::vector<IpcBufferDescriptor>* auto_output,
+                                      std::uint32_t auto_type) {
         const std::size_t stride = pointer ? 8U : 12U;
         if (count > (command_buffer.size() - std::min(cursor, command_buffer.size())) / stride)
             throw std::runtime_error("HIPC buffer descriptor array exceeds TLS command buffer");
         output.reserve(count);
         for (std::size_t i = 0; i < count; ++i) {
-            output.push_back(pointer
-                ? decode_pointer_descriptor(command_buffer, cursor)
-                : decode_map_descriptor(command_buffer, cursor));
+            if (pointer) {
+                output.push_back(decode_pointer_descriptor(command_buffer, cursor));
+            } else {
+                const IpcBufferDescriptor descriptor =
+                    decode_map_descriptor(command_buffer, cursor);
+                const std::uint32_t attributes = read_le32(command_buffer, cursor + 8U);
+                if (auto_output != nullptr && (attributes & 0xFFU) == auto_type)
+                    auto_output->push_back(descriptor);
+                else
+                    output.push_back(descriptor);
+            }
             cursor += stride;
         }
     };
 
     if (cursor > command_buffer.size())
         throw std::runtime_error("HIPC special header exceeds TLS command buffer");
-    read_descriptors(pointer_count, true, request.pointer_buffers);
-    read_descriptors(send_count, false, request.send_buffers);
-    read_descriptors(receive_count, false, request.receive_buffers);
-    read_descriptors(exchange_count, false, request.exchange_buffers);
+    read_descriptors(pointer_count, true, request.pointer_buffers, nullptr, 0U);
+    read_descriptors(send_count, false, request.send_buffers,
+                     &request.auto_send_buffers, 0x21U);
+    read_descriptors(receive_count, false, request.receive_buffers,
+                     &request.auto_receive_buffers, 0x22U);
+    read_descriptors(exchange_count, false, request.exchange_buffers, nullptr, 0U);
 
     const std::size_t raw_offset = align_up(cursor, 0x10U);
     const std::size_t raw_words = header1 & 0x3FFU;
@@ -234,10 +258,12 @@ std::vector<std::uint8_t> CmifCodec::build_response(
 }
 
 HorizonKernel::HorizonKernel(AddressSpace& memory,
-                             std::vector<std::uint8_t> romfs)
+                             std::vector<std::uint8_t> romfs,
+                             SdlAudioOutput& audio)
     : memory_(memory),
       hid_shared_memory_(std::make_shared<KSharedMemory>(kHidSharedMemorySize)),
-      romfs_(std::make_shared<const std::vector<std::uint8_t>>(std::move(romfs))) {
+      romfs_(std::make_shared<const std::vector<std::uint8_t>>(std::move(romfs))),
+      audio_device_(audio) {
     auto sm_port = std::make_shared<KPort>("sm:");
     (void)handles_.insert(sm_port);
     const std::string sm_port_name = sm_port->name();
@@ -336,6 +362,7 @@ std::string HorizonKernel::read_guest_string(std::uint64_t address,
 std::string HorizonKernel::read_service_name(const CmifRequest& request) const {
     const IpcBufferDescriptor* descriptor = nullptr;
     if (!request.send_buffers.empty()) descriptor = &request.send_buffers.front();
+    else if (!request.auto_send_buffers.empty()) descriptor = &request.auto_send_buffers.front();
     else if (!request.pointer_buffers.empty()) descriptor = &request.pointer_buffers.front();
 
     if (descriptor != nullptr) {
@@ -426,7 +453,8 @@ CmifResponse HorizonKernel::dispatch_cmif(
                 response.result = kInvalidArgument;
                 return response;
             }
-            if (service_name != "hid" && service_name != "fsp-srv") {
+            if (service_name != "hid" && service_name != "fsp-srv" &&
+                service_name != "audout:u") {
                 response.result = kInvalidArgument;
                 return response;
             }
@@ -461,6 +489,10 @@ CmifResponse HorizonKernel::dispatch_cmif(
         }
         response.result = kInvalidCommand;
         return response;
+    }
+
+    if (session.service_name() == "audout:u") {
+        return dispatch_audio_manager(request);
     }
 
     if (session.service_name() == "fsp-srv") {
@@ -500,6 +532,9 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
         } else if (object->kind() == KernelObjectKind::Storage) {
             response = dispatch_storage(
                 *std::static_pointer_cast<KStorage>(object), request);
+        } else if (object->kind() == KernelObjectKind::AudioOut) {
+            response = dispatch_audio_out(
+                std::static_pointer_cast<KAudioOut>(object), request);
         } else {
             state.x[0] = kInvalidHandle;
             return;
@@ -519,6 +554,287 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
         std::cerr << "[HorizonKernel] svcSendSyncRequest failed: "
                   << error.what() << '\n';
         state.x[0] = kInvalidArgument;
+    }
+}
+
+const IpcBufferDescriptor* HorizonKernel::find_send_buffer(
+    const CmifRequest& request, bool allow_pointer) const noexcept {
+    if (!request.send_buffers.empty()) return &request.send_buffers.front();
+    if (!request.auto_send_buffers.empty()) return &request.auto_send_buffers.front();
+    if (allow_pointer && !request.pointer_buffers.empty())
+        return &request.pointer_buffers.front();
+    return nullptr;
+}
+
+const IpcBufferDescriptor* HorizonKernel::find_receive_buffer(
+    const CmifRequest& request) const noexcept {
+    if (!request.receive_buffers.empty()) return &request.receive_buffers.front();
+    if (!request.auto_receive_buffers.empty())
+        return &request.auto_receive_buffers.front();
+    if (!request.exchange_buffers.empty()) return &request.exchange_buffers.front();
+    return nullptr;
+}
+
+CmifResponse HorizonKernel::dispatch_audio_manager(
+    const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+
+    if (request.command_id == 0U) {
+        const IpcBufferDescriptor* destination = find_receive_buffer(request);
+        if (destination == nullptr || destination->size < 9U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const std::vector<std::uint8_t> name{
+            'D', 'e', 'v', 'i', 'c', 'e', 'O', 'u', 't'
+        };
+        try {
+            memory_.write(destination->address, name);
+            append_le32(response.data, 1U);
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+        }
+        return response;
+    }
+
+    if (request.command_id == 1U) {
+        const IpcBufferDescriptor* source = find_send_buffer(request);
+        if (source == nullptr || source->size == 0U || source->size > 0x100U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        try {
+            const auto name_bytes = memory_.view(
+                source->address, static_cast<std::size_t>(source->size),
+                Permission::Read);
+            const std::string device_name = trim_string(name_bytes);
+            if (device_name != "DeviceOut") {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            auto audio_out = std::make_shared<KAudioOut>(audio_device_);
+            audio_sessions_.push_back(audio_out);
+            response.handle = handles_.insert(audio_out);
+            response.move_handle = true;
+            append_le32(response.data, 48000U);
+            append_le32(response.data, 2U);
+            append_le32(response.data, 2U);
+            append_le32(response.data, 0U);
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+        }
+        return response;
+    }
+
+    response.result = kInvalidCommand;
+    return response;
+}
+
+CmifResponse HorizonKernel::dispatch_audio_out(
+    const std::shared_ptr<KAudioOut>& audio_out,
+    const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+
+    if (request.command_id == 0U) {
+        append_le32(response.data, audio_out->started ? 0U : 1U);
+        return response;
+    }
+
+    if (request.command_id == 1U) {
+        audio_out->started = true;
+        audio_out->device.pause(false);
+        return response;
+    }
+
+    if (request.command_id == 2U) {
+        audio_out->started = false;
+        audio_out->device.pause(true);
+        audio_out->device.clear();
+        release_all_audio_buffers(audio_out);
+        return response;
+    }
+
+    if (request.command_id == 3U || request.command_id == 7U) {
+        const IpcBufferDescriptor* descriptor = find_send_buffer(request, true);
+        if (descriptor == nullptr ||
+            descriptor->size < kAudioOutBufferHeaderSize) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+
+        try {
+            const auto header = memory_.view(
+                descriptor->address, kAudioOutBufferHeaderSize, Permission::Read);
+            const std::uint64_t sample_buffer_ptr = read_le64(header, 8U);
+            const std::uint64_t sample_buffer_capacity = read_le64(header, 16U);
+            const std::uint64_t data_size = read_le64(header, 24U);
+            const std::uint64_t data_offset = read_le64(header, 32U);
+
+            if (data_size == 0U || data_size > sample_buffer_capacity ||
+                data_offset > sample_buffer_capacity ||
+                data_size > sample_buffer_capacity - data_offset ||
+                sample_buffer_ptr > std::numeric_limits<std::uint64_t>::max() - data_offset ||
+                data_size > 4U * 1024U * 1024U ||
+                (data_size & 3U) != 0U ||
+                data_size > std::numeric_limits<std::size_t>::max()) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+
+            const auto pcm = memory_.view(
+                sample_buffer_ptr + data_offset,
+                static_cast<std::size_t>(data_size), Permission::Read);
+            audio_out->device.queue_pcm(pcm);
+            audio_out->submitted_bytes += data_size;
+            audio_out->active_buffers.push_back(
+                QueuedAudioBuffer{descriptor->address, audio_out->submitted_bytes});
+            if (audio_out->released_buffers.empty())
+                audio_out->buffer_event->signaled = false;
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+        }
+        return response;
+    }
+
+    if (request.command_id == 4U) {
+        response.handle = handles_.insert(audio_out->buffer_event);
+        response.move_handle = false;
+        return response;
+    }
+
+    if (request.command_id == 5U || request.command_id == 8U) {
+        update_audio_out(audio_out);
+        const IpcBufferDescriptor* destination = find_receive_buffer(request);
+        if (destination == nullptr || destination->size < 8U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const std::size_t capacity = static_cast<std::size_t>(
+            std::min<std::uint64_t>(destination->size / 8U, 256U));
+        std::uint32_t count = 0U;
+        try {
+            while (count < capacity && !audio_out->released_buffers.empty()) {
+                memory_.write_u64(destination->address +
+                                  static_cast<std::uint64_t>(count) * 8U,
+                                  audio_out->released_buffers.front());
+                audio_out->released_buffers.pop_front();
+                ++count;
+            }
+            append_le32(response.data, count);
+            audio_out->buffer_event->signaled =
+                !audio_out->released_buffers.empty();
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+        }
+        return response;
+    }
+
+    response.result = kInvalidCommand;
+    return response;
+}
+
+void HorizonKernel::update_audio_out(
+    const std::shared_ptr<KAudioOut>& audio_out) {
+    const std::uint64_t queued = audio_out->device.queued_bytes();
+    const std::uint64_t consumed = audio_out->submitted_bytes > queued
+        ? audio_out->submitted_bytes - queued : 0U;
+    while (!audio_out->active_buffers.empty() &&
+           audio_out->active_buffers.front().end_byte <= consumed) {
+        audio_out->released_buffers.push_back(
+            audio_out->active_buffers.front().header_address);
+        audio_out->active_buffers.pop_front();
+    }
+    if (!audio_out->released_buffers.empty())
+        audio_out->buffer_event->signaled = true;
+}
+
+void HorizonKernel::release_all_audio_buffers(
+    const std::shared_ptr<KAudioOut>& audio_out) {
+    while (!audio_out->active_buffers.empty()) {
+        audio_out->released_buffers.push_back(
+            audio_out->active_buffers.front().header_address);
+        audio_out->active_buffers.pop_front();
+    }
+    audio_out->buffer_event->signaled = true;
+}
+
+void HorizonKernel::update_audio_events() {
+    auto destination = audio_sessions_.begin();
+    for (auto it = audio_sessions_.begin(); it != audio_sessions_.end(); ++it) {
+        if (auto session = it->lock()) {
+            update_audio_out(session);
+            *destination++ = *it;
+        }
+    }
+    audio_sessions_.erase(destination, audio_sessions_.end());
+}
+
+void HorizonKernel::svc_reset_signal(CpuState& state) {
+    const auto object = handles_.get(static_cast<Handle>(state.x[0]));
+    if (!object || object->kind() != KernelObjectKind::Event) {
+        state.x[0] = kInvalidHandle;
+        return;
+    }
+    std::static_pointer_cast<KEvent>(object)->signaled = false;
+    state.x[0] = kSuccess;
+}
+
+void HorizonKernel::svc_wait_synchronization(CpuState& state) {
+    const std::uint64_t handles_address = state.x[1];
+    const std::uint64_t handle_count = state.x[2];
+    if (handle_count == 0U || handle_count > 64U ||
+        handles_address > std::numeric_limits<std::uint64_t>::max() -
+            handle_count * sizeof(std::uint32_t)) {
+        state.x[0] = kInvalidArgument;
+        state.x[1] = 0U;
+        return;
+    }
+
+    try {
+        const auto raw_handles = memory_.view(
+            handles_address, static_cast<std::size_t>(handle_count) * 4U,
+            Permission::Read);
+        std::vector<Handle> handles;
+        handles.reserve(static_cast<std::size_t>(handle_count));
+        for (std::size_t index = 0; index < handle_count; ++index)
+            handles.push_back(read_le32(raw_handles, index * 4U));
+
+        const auto find_signaled = [&]() -> std::optional<std::uint32_t> {
+            for (std::size_t index = 0; index < handles.size(); ++index) {
+                const auto object = handles_.get(handles[index]);
+                if (object && object->kind() == KernelObjectKind::Event &&
+                    std::static_pointer_cast<KEvent>(object)->signaled) {
+                    return static_cast<std::uint32_t>(index);
+                }
+            }
+            return std::nullopt;
+        };
+
+        std::optional<std::uint32_t> ready = find_signaled();
+        for (unsigned attempt = 0U; !ready.has_value() && attempt < 120U; ++attempt) {
+            update_audio_events();
+            ready = find_signaled();
+            if (!ready.has_value()) SDL_Delay(1U);
+        }
+
+        if (!ready.has_value()) {
+            for (std::size_t index = 0; index < handles.size(); ++index) {
+                const auto object = handles_.get(handles[index]);
+                if (object && object->kind() == KernelObjectKind::Event) {
+                    std::static_pointer_cast<KEvent>(object)->signaled = true;
+                    ready = static_cast<std::uint32_t>(index);
+                    break;
+                }
+            }
+        }
+
+        state.x[1] = ready.value_or(0U);
+        state.x[0] = ready.has_value() ? kSuccess : kInvalidHandle;
+    } catch (const std::exception&) {
+        state.x[0] = kInvalidArgument;
+        state.x[1] = 0U;
     }
 }
 
@@ -624,6 +940,8 @@ void SvcHandler::dispatch(std::uint16_t immediate, CpuState& state) {
     case 0x09: kernel_.svc_close_handle(state); break;
     case 0x14: kernel_.svc_map_shared_memory(state); break;
     case 0x15: kernel_.svc_unmap_shared_memory(state); break;
+    case 0x17: kernel_.svc_reset_signal(state); break;
+    case 0x18: kernel_.svc_wait_synchronization(state); break;
     case 0x1F: kernel_.svc_connect_to_named_port(state); break;
     case 0x21: kernel_.svc_send_sync_request(state); break;
     case 0x26: kernel_.svc_break(state); break;
