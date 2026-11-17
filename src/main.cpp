@@ -1308,7 +1308,7 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel) {
             executed_total += cleanup_instructions;
             if (kernel.running())
                 std::cout << "SDL2 close: applet ExitRequest was queued; "
-                             "guest did not exit within the cleanup instruction budget.\\n";
+                             "guest did not exit within the cleanup instruction budget.\n";
             break;
         }
 
@@ -1323,7 +1323,7 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel) {
         kernel.signal_vsync();
         std::this_thread::sleep_until(frame_start + frame_duration);
     }
-    std::cout << "Executed guest instructions: " << executed_total << '\\n';
+    std::cout << "Executed guest instructions: " << executed_total << '\n';
     kernel.print_ipc_statistics();
     return 0;
 }
@@ -1368,7 +1368,7 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("LoaderConfig self-test failed");
             if (!kernel.validate_stage9_services())
                 throw std::runtime_error("appletOE/time:u self-test failed");
-            std::cout << "LoaderConfig + appletOE + time:u self-test passed\\n";
+            std::cout << "LoaderConfig + appletOE + time:u self-test passed\n";
         }
 
         if (options.headless)
