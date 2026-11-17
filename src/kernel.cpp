@@ -11,7 +11,7 @@
 namespace horizon {
 namespace {
 
-constexpr std::uint32_t kSuccess = 0;
+constexpr std::uint32_t kSuccess = 0U;
 constexpr std::uint32_t kInvalidHandle = 0xF001U;
 constexpr std::uint32_t kInvalidArgument = 0xF601U;
 constexpr std::uint32_t kInvalidCommand = 0xE401U;
@@ -26,6 +26,16 @@ std::uint32_t read_le32(std::span<const std::uint8_t> bytes,
         (static_cast<std::uint32_t>(bytes[offset + 1U]) << 8U) |
         (static_cast<std::uint32_t>(bytes[offset + 2U]) << 16U) |
         (static_cast<std::uint32_t>(bytes[offset + 3U]) << 24U);
+}
+
+std::uint64_t read_le64(std::span<const std::uint8_t> bytes,
+                        std::size_t offset) {
+    if (offset > bytes.size() || bytes.size() - offset < 8U)
+        throw std::runtime_error("truncated CMIF u64 parameter");
+    std::uint64_t value = 0U;
+    for (unsigned i = 0; i < 8U; ++i)
+        value |= static_cast<std::uint64_t>(bytes[offset + i]) << (i * 8U);
+    return value;
 }
 
 void write_le32(std::vector<std::uint8_t>& bytes, std::size_t offset,
@@ -44,13 +54,44 @@ void write_le64(std::vector<std::uint8_t>& bytes, std::size_t offset,
         bytes[offset + i] = static_cast<std::uint8_t>(value >> (i * 8U));
 }
 
+void append_le64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
+    for (unsigned i = 0; i < 8U; ++i)
+        bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8U)));
+}
+
 std::size_t align_up(std::size_t value, std::size_t alignment) {
     return (value + alignment - 1U) & ~(alignment - 1U);
 }
 
-std::string trim_service_name(const std::vector<std::uint8_t>& bytes) {
+std::string trim_string(std::span<const std::uint8_t> bytes) {
     const auto end = std::find(bytes.begin(), bytes.end(), 0U);
     return std::string(bytes.begin(), end);
+}
+
+IpcBufferDescriptor decode_map_descriptor(
+    std::span<const std::uint8_t> bytes, std::size_t offset) {
+    const std::uint32_t size_low = read_le32(bytes, offset);
+    const std::uint32_t address_low = read_le32(bytes, offset + 4U);
+    const std::uint32_t attributes = read_le32(bytes, offset + 8U);
+    IpcBufferDescriptor descriptor;
+    descriptor.size = static_cast<std::uint64_t>(size_low) |
+        (static_cast<std::uint64_t>((attributes >> 24U) & 0xFU) << 32U);
+    descriptor.address = static_cast<std::uint64_t>(address_low) |
+        (static_cast<std::uint64_t>((attributes >> 28U) & 0xFU) << 32U) |
+        (static_cast<std::uint64_t>((attributes >> 2U) & 0x7U) << 36U);
+    return descriptor;
+}
+
+IpcBufferDescriptor decode_pointer_descriptor(
+    std::span<const std::uint8_t> bytes, std::size_t offset) {
+    const std::uint32_t tag = read_le32(bytes, offset);
+    const std::uint32_t address_low = read_le32(bytes, offset + 4U);
+    IpcBufferDescriptor descriptor;
+    descriptor.size = (tag >> 16U) & 0xFFFFU;
+    descriptor.address = static_cast<std::uint64_t>(address_low) |
+        (static_cast<std::uint64_t>((tag >> 12U) & 0xFU) << 32U) |
+        (static_cast<std::uint64_t>((tag >> 6U) & 0x7U) << 36U);
+    return descriptor;
 }
 
 } // namespace
@@ -69,11 +110,20 @@ const std::string& KClientSession::service_name() const noexcept {
 KSharedMemory::KSharedMemory(std::size_t size)
     : KObject(KernelObjectKind::SharedMemory), bytes(size, 0U) {}
 
+KStorage::KStorage(std::shared_ptr<const std::vector<std::uint8_t>> romfs)
+    : KObject(KernelObjectKind::Storage), romfs_(std::move(romfs)) {
+    if (!romfs_) throw std::invalid_argument("IStorage requires a RomFS image");
+}
+const std::vector<std::uint8_t>& KStorage::romfs() const noexcept {
+    return *romfs_;
+}
+
 Handle HandleTable::insert(std::shared_ptr<KObject> object) {
     if (!object) throw std::invalid_argument("cannot insert a null kernel object");
     while (next_handle_ == 0U || objects_.contains(next_handle_)) {
         ++next_handle_;
-        if (next_handle_ == 0U) throw std::overflow_error("kernel handle table exhausted");
+        if (next_handle_ == 0U)
+            throw std::overflow_error("kernel handle table exhausted");
     }
     const Handle result = next_handle_++;
     objects_.emplace(result, std::move(object));
@@ -96,51 +146,98 @@ CmifRequest CmifCodec::parse_request(
     if (command_buffer.size() < 0x20U)
         throw std::runtime_error("IPC command buffer is shorter than a CMIF header");
 
-    const std::uint32_t handle_descriptor = read_le32(command_buffer, 8U);
-    const std::size_t copy_count = handle_descriptor & 0xFU;
-    const std::size_t move_count = (handle_descriptor >> 4U) & 0xFU;
-    const std::size_t cmif_offset = align_up(12U + 4U * (copy_count + move_count), 0x10U);
-    if (cmif_offset > command_buffer.size() ||
-        command_buffer.size() - cmif_offset < 0x10U)
-        throw std::runtime_error("IPC descriptor area exceeds command buffer");
-    if (read_le32(command_buffer, cmif_offset) != kSfciMagic)
-        throw std::runtime_error("IPC request does not contain SFCI magic");
+    const std::uint32_t header0 = read_le32(command_buffer, 0U);
+    const std::uint32_t header1 = read_le32(command_buffer, 4U);
+    const std::size_t pointer_count = (header0 >> 16U) & 0xFU;
+    const std::size_t send_count = (header0 >> 20U) & 0xFU;
+    const std::size_t receive_count = (header0 >> 24U) & 0xFU;
+    const std::size_t exchange_count = (header0 >> 28U) & 0xFU;
+    const bool has_special_header = (header1 & 0x80000000U) != 0U;
+
+    std::size_t cursor = 8U;
+    if (has_special_header) {
+        const std::uint32_t special = read_le32(command_buffer, cursor);
+        cursor += 4U;
+        if ((special & 1U) != 0U) cursor += 8U;
+        const std::size_t copy_count = (special >> 1U) & 0xFU;
+        const std::size_t move_count = (special >> 5U) & 0xFU;
+        cursor += (copy_count + move_count) * 4U;
+    }
 
     CmifRequest request;
-    request.command_id = read_le32(command_buffer, cmif_offset + 8U);
-    const std::size_t data_offset = cmif_offset + 0x10U;
-    request.data.assign(command_buffer.begin() + static_cast<std::ptrdiff_t>(data_offset),
-                        command_buffer.end());
+    const auto read_descriptors = [&](std::size_t count, bool pointer,
+                                      std::vector<IpcBufferDescriptor>& output) {
+        const std::size_t stride = pointer ? 8U : 12U;
+        if (count > (command_buffer.size() - std::min(cursor, command_buffer.size())) / stride)
+            throw std::runtime_error("HIPC buffer descriptor array exceeds TLS command buffer");
+        output.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            output.push_back(pointer
+                ? decode_pointer_descriptor(command_buffer, cursor)
+                : decode_map_descriptor(command_buffer, cursor));
+            cursor += stride;
+        }
+    };
+
+    if (cursor > command_buffer.size())
+        throw std::runtime_error("HIPC special header exceeds TLS command buffer");
+    read_descriptors(pointer_count, true, request.pointer_buffers);
+    read_descriptors(send_count, false, request.send_buffers);
+    read_descriptors(receive_count, false, request.receive_buffers);
+    read_descriptors(exchange_count, false, request.exchange_buffers);
+
+    const std::size_t raw_offset = align_up(cursor, 0x10U);
+    const std::size_t raw_words = header1 & 0x3FFU;
+    const std::size_t raw_size = raw_words * 4U;
+    if (raw_size < 0x10U || raw_offset > command_buffer.size() ||
+        raw_size > command_buffer.size() - raw_offset)
+        throw std::runtime_error("HIPC raw data range is invalid");
+    if (read_le32(command_buffer, raw_offset) != kSfciMagic)
+        throw std::runtime_error("IPC request does not contain SFCI magic");
+
+    request.command_id = read_le32(command_buffer, raw_offset + 8U);
+    const std::size_t payload_offset = raw_offset + 0x10U;
+    const std::size_t payload_size = raw_size - 0x10U;
+    request.data.assign(
+        command_buffer.begin() + static_cast<std::ptrdiff_t>(payload_offset),
+        command_buffer.begin() + static_cast<std::ptrdiff_t>(payload_offset + payload_size));
     return request;
 }
 
 std::vector<std::uint8_t> CmifCodec::build_response(
     const CmifResponse& response, std::size_t capacity) {
-    const std::size_t descriptor_count = response.handle.has_value() ? 1U : 0U;
-    const std::size_t cmif_offset = align_up(12U + descriptor_count * 4U, 0x10U);
-    const std::size_t required = cmif_offset + 0x10U + response.data.size();
-    if (capacity < required) capacity = required;
-    std::vector<std::uint8_t> result(capacity, 0U);
+    const bool has_handle = response.handle.has_value();
+    const std::size_t special_size = has_handle ? 8U : 0U;
+    const std::size_t raw_offset = align_up(8U + special_size, 0x10U);
+    const std::size_t raw_size = align_up(0x10U + response.data.size(), 4U);
+    const std::size_t required = raw_offset + raw_size;
+    const std::size_t output_size = std::max(capacity, required);
+    if (raw_size / 4U > 0x3FFU)
+        throw std::runtime_error("CMIF response exceeds the HIPC raw-data limit");
 
+    std::vector<std::uint8_t> result(output_size, 0U);
     write_le32(result, 0U, 0U);
-    write_le32(result, 4U, static_cast<std::uint32_t>((required - 8U) / 4U));
-    if (response.handle.has_value()) {
-        const std::uint32_t descriptor = response.move_handle ? 0x10U : 0x01U;
-        write_le32(result, 8U, descriptor);
+    std::uint32_t header1 = static_cast<std::uint32_t>(raw_size / 4U);
+    if (has_handle) {
+        header1 |= 0x80000000U;
+        write_le32(result, 8U, response.move_handle ? 0x20U : 0x02U);
         write_le32(result, 12U, *response.handle);
     }
-    write_le32(result, cmif_offset, kSfcoMagic);
-    write_le32(result, cmif_offset + 4U, response.result);
-    write_le32(result, cmif_offset + 8U, response.command_id);
-    write_le32(result, cmif_offset + 12U, 0U);
+    write_le32(result, 4U, header1);
+    write_le32(result, raw_offset, kSfcoMagic);
+    write_le32(result, raw_offset + 4U, 0U);
+    write_le32(result, raw_offset + 8U, response.result);
+    write_le32(result, raw_offset + 12U, 0U);
     std::copy(response.data.begin(), response.data.end(),
-              result.begin() + static_cast<std::ptrdiff_t>(cmif_offset + 0x10U));
+              result.begin() + static_cast<std::ptrdiff_t>(raw_offset + 0x10U));
     return result;
 }
 
-HorizonKernel::HorizonKernel(AddressSpace& memory)
+HorizonKernel::HorizonKernel(AddressSpace& memory,
+                             std::vector<std::uint8_t> romfs)
     : memory_(memory),
-      hid_shared_memory_(std::make_shared<KSharedMemory>(kHidSharedMemorySize)) {
+      hid_shared_memory_(std::make_shared<KSharedMemory>(kHidSharedMemorySize)),
+      romfs_(std::make_shared<const std::vector<std::uint8_t>>(std::move(romfs))) {
     auto sm_port = std::make_shared<KPort>("sm:");
     (void)handles_.insert(sm_port);
     const std::string sm_port_name = sm_port->name();
@@ -159,13 +256,13 @@ void HorizonKernel::svc_set_heap_size(CpuState& state) {
     if (requested_size > kMaximumHeapSize ||
         requested_size > std::numeric_limits<std::size_t>::max()) {
         state.x[0] = kInvalidArgument;
-        state.x[1] = 0;
+        state.x[1] = 0U;
         return;
     }
     if (requested_size > heap_size_) {
         if (heap_size_ != 0U) {
             state.x[0] = kInvalidArgument;
-            state.x[1] = 0;
+            state.x[1] = 0U;
             return;
         }
         try {
@@ -174,7 +271,7 @@ void HorizonKernel::svc_set_heap_size(CpuState& state) {
             heap_size_ = requested_size;
         } catch (const std::exception&) {
             state.x[0] = kInvalidArgument;
-            state.x[1] = 0;
+            state.x[1] = 0U;
             return;
         }
     }
@@ -229,11 +326,30 @@ std::string HorizonKernel::read_guest_string(std::uint64_t address,
     std::string value;
     value.reserve(maximum);
     for (std::size_t i = 0; i < maximum; ++i) {
-        const std::uint8_t byte = memory_.view(address + i, 1U)[0];
+        const std::uint8_t byte = memory_.read_u8(address + i, Permission::Read);
         if (byte == 0U) return value;
         value.push_back(static_cast<char>(byte));
     }
-    throw std::runtime_error("guest string is not null terminated within its limit");
+    return value;
+}
+
+std::string HorizonKernel::read_service_name(const CmifRequest& request) const {
+    const IpcBufferDescriptor* descriptor = nullptr;
+    if (!request.send_buffers.empty()) descriptor = &request.send_buffers.front();
+    else if (!request.pointer_buffers.empty()) descriptor = &request.pointer_buffers.front();
+
+    if (descriptor != nullptr) {
+        if (descriptor->size == 0U || descriptor->size > 0x100U)
+            throw std::runtime_error("GetService buffer descriptor has an invalid size");
+        const std::size_t count = static_cast<std::size_t>(
+            std::min<std::uint64_t>(descriptor->size, 8U));
+        const auto bytes = memory_.view(descriptor->address, count, Permission::Read);
+        return trim_string(bytes);
+    }
+    if (request.data.empty())
+        throw std::runtime_error("GetService did not provide a service name");
+    return trim_string(std::span<const std::uint8_t>(request.data).first(
+        std::min<std::size_t>(request.data.size(), 8U)));
 }
 
 void HorizonKernel::svc_connect_to_named_port(CpuState& state) {
@@ -254,29 +370,68 @@ void HorizonKernel::svc_connect_to_named_port(CpuState& state) {
     }
 }
 
+CmifResponse HorizonKernel::dispatch_storage(
+    const KStorage& storage, const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+
+    if (request.command_id == 4U) {
+        append_le64(response.data, storage.romfs().size());
+        return response;
+    }
+
+    if (request.command_id == 0U) {
+        if (request.data.size() < 16U || request.receive_buffers.empty()) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const std::uint64_t offset = read_le64(request.data, 0U);
+        const std::uint64_t size = read_le64(request.data, 8U);
+        const IpcBufferDescriptor& destination = request.receive_buffers.front();
+        if (size > destination.size ||
+            offset > storage.romfs().size() ||
+            size > storage.romfs().size() - offset ||
+            size > std::numeric_limits<std::size_t>::max()) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        try {
+            const auto first = storage.romfs().begin() +
+                static_cast<std::ptrdiff_t>(offset);
+            const auto last = first + static_cast<std::ptrdiff_t>(size);
+            std::vector<std::uint8_t> bytes(first, last);
+            memory_.write(destination.address, bytes);
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+        }
+        return response;
+    }
+
+    response.result = kInvalidCommand;
+    return response;
+}
+
 CmifResponse HorizonKernel::dispatch_cmif(
     const KClientSession& session, const CmifRequest& request) {
     CmifResponse response;
     response.command_id = request.command_id;
 
     if (session.service_name() == "sm") {
-        if (request.command_id == 0U) {
-            return response;
-        }
+        if (request.command_id == 0U) return response;
         if (request.command_id == 1U) {
-            if (request.data.size() < 8U) {
+            std::string service_name;
+            try {
+                service_name = read_service_name(request);
+            } catch (const std::exception&) {
                 response.result = kInvalidArgument;
                 return response;
             }
-            std::vector<std::uint8_t> name_bytes(request.data.begin(),
-                                                  request.data.begin() + 8);
-            const std::string service_name = trim_service_name(name_bytes);
-            if (service_name != "hid") {
+            if (service_name != "hid" && service_name != "fsp-srv") {
                 response.result = kInvalidArgument;
                 return response;
             }
             response.handle = handles_.insert(
-                std::make_shared<KClientSession>("hid"));
+                std::make_shared<KClientSession>(service_name));
             response.move_handle = true;
             return response;
         }
@@ -292,9 +447,8 @@ CmifResponse HorizonKernel::dispatch_cmif(
             return response;
         }
         if (request.command_id == 100U || request.command_id == 101U ||
-            request.command_id == 103U) {
+            request.command_id == 103U)
             return response;
-        }
         response.result = kInvalidCommand;
         return response;
     }
@@ -309,6 +463,22 @@ CmifResponse HorizonKernel::dispatch_cmif(
         return response;
     }
 
+    if (session.service_name() == "fsp-srv") {
+        if (request.command_id == 1U) {
+            if (request.data.size() < 8U)
+                response.result = kInvalidArgument;
+            return response;
+        }
+        if (request.command_id == 200U) {
+            response.handle = handles_.insert(
+                std::make_shared<KStorage>(romfs_));
+            response.move_handle = true;
+            return response;
+        }
+        response.result = kInvalidCommand;
+        return response;
+    }
+
     response.result = kInvalidCommand;
     return response;
 }
@@ -317,15 +487,27 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
     try {
         const Handle handle = static_cast<Handle>(state.x[0]);
         const auto object = handles_.get(handle);
-        if (!object || object->kind() != KernelObjectKind::ClientSession) {
+        if (!object) {
             state.x[0] = kInvalidHandle;
             return;
         }
-        const auto session = std::static_pointer_cast<KClientSession>(object);
         const auto command_buffer = memory_.view(state.tpidrro_el0, 0x100U);
         const CmifRequest request = CmifCodec::parse_request(command_buffer);
-        const CmifResponse response = dispatch_cmif(*session, request);
-        const std::vector<std::uint8_t> reply = CmifCodec::build_response(response, 0x100U);
+        CmifResponse response;
+        if (object->kind() == KernelObjectKind::ClientSession) {
+            response = dispatch_cmif(
+                *std::static_pointer_cast<KClientSession>(object), request);
+        } else if (object->kind() == KernelObjectKind::Storage) {
+            response = dispatch_storage(
+                *std::static_pointer_cast<KStorage>(object), request);
+        } else {
+            state.x[0] = kInvalidHandle;
+            return;
+        }
+        const std::vector<std::uint8_t> reply =
+            CmifCodec::build_response(response, 0x100U);
+        if (reply.size() > 0x100U)
+            throw std::runtime_error("IPC reply does not fit the TLS command buffer");
         memory_.write(state.tpidrro_el0, reply);
         state.x[0] = kSuccess;
     } catch (const std::exception&) {
@@ -422,6 +604,9 @@ void HorizonKernel::update_hid_input(std::uint64_t buttons) {
 
 bool HorizonKernel::running() const noexcept { return running_; }
 const HandleTable& HorizonKernel::handles() const noexcept { return handles_; }
+std::size_t HorizonKernel::romfs_size() const noexcept {
+    return romfs_ ? romfs_->size() : 0U;
+}
 
 SvcHandler::SvcHandler(HorizonKernel& kernel) noexcept : kernel_(kernel) {}
 
