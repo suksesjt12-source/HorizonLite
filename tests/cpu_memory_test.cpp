@@ -9,7 +9,7 @@
 
 int main() {
     horizon::AddressSpace memory;
-    const std::array<std::uint32_t, 14> program{
+    const std::array<std::uint32_t, 17> program{
         0xD2800001U, // MOVZ X1, #0
         0xF2A00041U, // MOVK X1, #2, LSL #16 (0x20000)
         0xD2824680U, // MOVZ X0, #0x1234
@@ -19,6 +19,9 @@ int main() {
         0xF2AB0005U, // MOVK X5, #0x5800, LSL #16
         0xB9002425U, // STR W5, [X1, #36]
         0xB9402426U, // LDR W6, [X1, #36]
+        0xD2801567U, // MOVZ X7, #0xAB
+        0x3900A027U, // STRB W7, [X1, #40]
+        0x3940A028U, // LDRB W8, [X1, #40]
         0xEB03001FU, // CMP X0, X3
         0x54000061U, // B.NE +3 (to failure marker)
         0xD2800544U, // MOVZ X4, #42
@@ -45,11 +48,11 @@ int main() {
     cpu.state().pc = 0x10000;
     const std::size_t executed = cpu.run(100, UINT64_MAX);
 
-    const bool passed = executed == 14U &&
+    const bool passed = executed == 17U &&
         memory.read_u64(0x20000 + 24U) == 0x1234U &&
         memory.read_u32(0x20000 + 36U) == 0x58005600U &&
         cpu.state().x[3] == 0x1234U && cpu.state().x[6] == 0x58005600U &&
-        cpu.state().x[4] == 42U && !kernel.running();
+        cpu.state().x[4] == 42U && cpu.state().x[8] == 0xABU &&\n        memory.read_u8(0x20000 + 40U) == 0xABU && !kernel.running();
 
     if (!passed) {
         std::cerr << "CPU memory/branch test failed; executed=" << executed
@@ -59,6 +62,6 @@ int main() {
         return 1;
     }
 
-    std::cout << "CPU 64-bit/32-bit STR-LDR and CMP/B.NE test passed\n";
+    std::cout << "CPU byte/word/doubleword memory and branch test passed\n";
     return 0;
 }
