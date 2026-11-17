@@ -1076,8 +1076,7 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
     return 0;
 }
 
-int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
-                    const horizon::AddressSpace& memory) {
+int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel) {
     horizon::SdlDisplay display;
     constexpr auto frame_duration = std::chrono::microseconds(16667);
     bool keep_open = true;
@@ -1119,7 +1118,7 @@ int main(int argc, char** argv) {
 
         if (options.headless)
             return run_headless(cpu, kernel, memory, program.self_test);
-        return run_interactive(cpu, kernel, memory);
+        return run_interactive(cpu, kernel);
     } catch (const std::exception& error) {
         std::cerr << "HorizonLite: " << error.what() << '\n';
         return 1;
