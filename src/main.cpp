@@ -24,7 +24,6 @@
 
 namespace {
 
-constexpr std::uint64_t kFramebufferAddress = 0x40000000ULL;
 constexpr int kFramebufferWidth = 1280;
 constexpr int kFramebufferHeight = 720;
 constexpr std::size_t kFramebufferBytes =
@@ -41,6 +40,7 @@ constexpr std::uint64_t kSpriteBufferAddress = 0x21000000ULL;
 constexpr std::uint64_t kPcmBufferAddress = 0x22000000ULL;
 constexpr std::uint64_t kAudioBufferHeaderAddress = 0x22010000ULL;
 constexpr std::uint64_t kAudioReleasedArrayAddress = 0x22011000ULL;
+constexpr std::uint64_t kStage6ScratchAddress = 0x23000000ULL;
 constexpr std::uint64_t kStopAddress = std::numeric_limits<std::uint64_t>::max();
 constexpr std::size_t kInteractiveInstructionBudget = 180000U;
 constexpr std::size_t kHeadlessInstructionLimit = 1000000U;
@@ -292,6 +292,49 @@ void emit_cmif_request(A64Assembler& a, unsigned command_id,
     }
 }
 
+void emit_cmif_request_send_receive(
+    A64Assembler& a, unsigned command_id,
+    std::uint64_t send_address, std::uint64_t send_size,
+    std::uint64_t receive_address, std::uint64_t receive_size,
+    const std::vector<std::uint8_t>& payload = {}) {
+    constexpr std::uint32_t header0 =
+        kHipcInvoke2Method | (1U << 20U) | (1U << 24U);
+    const std::size_t raw_words = (0x10U + payload.size() + 3U) / 4U;
+    if (raw_words > 0x3FFU)
+        throw std::runtime_error("guest self-test CMIF request exceeds HIPC raw limit");
+    constexpr std::size_t cmif_offset = 0x20U;
+    a.mov64(0U, header0);
+    a.str_w(0U, 20U, 0U);
+    a.mov64(0U, static_cast<std::uint32_t>(raw_words));
+    a.str_w(0U, 20U, 4U);
+    a.mov64(0U, static_cast<std::uint32_t>(send_size));
+    a.str_w(0U, 20U, 8U);
+    a.mov64(0U, static_cast<std::uint32_t>(send_address));
+    a.str_w(0U, 20U, 12U);
+    a.movz(0U, 0U);
+    a.str_w(0U, 20U, 16U);
+    a.mov64(0U, static_cast<std::uint32_t>(receive_size));
+    a.str_w(0U, 20U, 20U);
+    a.mov64(0U, static_cast<std::uint32_t>(receive_address));
+    a.str_w(0U, 20U, 24U);
+    a.movz(0U, 0U);
+    a.str_w(0U, 20U, 28U);
+    const auto store_word = [&a](std::size_t offset, std::uint32_t value) {
+        a.mov64(0U, value);
+        a.str_w(0U, 20U, static_cast<unsigned>(cmif_offset + offset));
+    };
+    store_word(0U, 0x49434653U);
+    store_word(4U, 0U);
+    store_word(8U, command_id);
+    store_word(12U, 0U);
+    for (std::size_t index = 0; index < payload.size(); index += 4U) {
+        std::uint32_t word = 0U;
+        for (unsigned byte = 0U; byte < 4U && index + byte < payload.size(); ++byte)
+            word |= static_cast<std::uint32_t>(payload[index + byte]) << (byte * 8U);
+        store_word(0x10U + index, word);
+    }
+}
+
 void emit_named_service_request(A64Assembler& a, std::uint64_t name_address) {
     emit_cmif_request(a, 1U, IpcDescriptorKind::Send,
                       name_address, 8U);
@@ -304,6 +347,162 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.svc(0x1FU);
     a.mov_reg(19U, 1U);
     a.mrs_tpidrro(20U);
+
+    a.movz(0U, 0U);
+    a.mov64(1U, 0x00C00000U);
+    a.svc(0x01U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_x(1U, 2U, 0x80U);
+
+    emit_named_service_request(a, kSelfTestStringsAddress + 48U);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(10U, 2U, 0x88U);
+
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Send,
+                      kSelfTestStringsAddress + 64U, 11U);
+    a.ldr_w(0U, 2U, 0x88U);
+    a.svc(0x21U);
+    a.ldr_w(11U, 20U, 32U);
+    a.str_w(11U, 2U, 0x8CU);
+
+    a.mov64(0U, 0U);
+    a.str_w(0U, 2U, 0x200U);
+    a.mov64(0U, 0x00800000U);
+    a.str_w(0U, 2U, 0x204U);
+    const std::vector<std::uint8_t> create_ioctl{
+        0U, 0U, 0U, 0U, 0x01U, 0x01U, 0x08U, 0xC0U
+    };
+    emit_cmif_request(a, 1U, IpcDescriptorKind::Send,
+                      kStage6ScratchAddress + 0x200U, 8U, create_ioctl);
+    a.ldr_w(0U, 2U, 0x8CU);
+    a.str_w(0U, 20U, 0x30U);
+    a.ldr_w(0U, 2U, 0x88U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 2U, 0x200U);
+    a.str_w(10U, 2U, 0x90U);
+
+    a.ldr_w(0U, 2U, 0x90U);
+    a.str_w(0U, 2U, 0x220U);
+    a.mov64(0U, 1U);
+    a.str_w(0U, 2U, 0x224U);
+    a.movz(0U, 0U);
+    a.str_w(0U, 2U, 0x228U);
+    a.mov64(0U, 0x1000U);
+    a.str_w(0U, 2U, 0x22CU);
+    a.movz(0U, 0U);
+    a.str_w(0U, 2U, 0x230U);
+    a.str_w(0U, 2U, 0x234U);
+    a.ldr_x(1U, 2U, 0x80U);
+    a.mov64(0U, 0x00100000U);
+    a.add_reg(0U, 1U, 0U);
+    a.str_x(0U, 2U, 0x238U);
+    a.str_x(0U, 2U, 0xA0U);
+    const std::vector<std::uint8_t> alloc_ioctl{
+        0U, 0U, 0U, 0U, 0x04U, 0x01U, 0x20U, 0xC0U
+    };
+    emit_cmif_request(a, 1U, IpcDescriptorKind::Send,
+                      kStage6ScratchAddress + 0x220U, 32U, alloc_ioctl);
+    a.ldr_w(0U, 2U, 0x8CU);
+    a.str_w(0U, 20U, 0x30U);
+    a.ldr_w(0U, 2U, 0x88U);
+    a.svc(0x21U);
+
+    emit_named_service_request(a, kSelfTestStringsAddress + 56U);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0x94U);
+
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0x94U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0x98U);
+
+    emit_cmif_request(a, 1010U, IpcDescriptorKind::Send,
+                      kSelfTestStringsAddress + 80U, 8U);
+    a.ldr_w(0U, 2U, 0x98U);
+    a.svc(0x21U);
+
+    const std::vector<std::uint8_t> open_layer_payload(16U, 0U);
+    emit_cmif_request_send_receive(
+        a, 2020U, kSelfTestStringsAddress + 80U, 8U,
+        kStage6ScratchAddress + 0x340U, 0x100U, open_layer_payload);
+    a.ldr_w(0U, 2U, 0x98U);
+    a.svc(0x21U);
+
+    emit_cmif_request(a, 100U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0x98U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0x9CU);
+
+    emit_cmif_request(a, 5202U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0x98U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0xA8U);
+
+    emit_cmif_request(a, 2101U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0x98U);
+    a.svc(0x21U);
+
+    emit_cmif_request(a, 2U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0x9CU);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0xACU);
+
+    const std::vector<std::uint8_t> connect_parcel{
+        1U, 0U, 0U, 0U, 10U, 0U, 0U, 0U
+    };
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U,
+                      connect_parcel);
+    a.ldr_w(0U, 2U, 0x9CU);
+    a.svc(0x21U);
+
+    a.mov64(0U, 0x43524150U);
+    a.str_w(0U, 2U, 0x300U);
+    a.mov64(0U, 1U);
+    a.str_w(0U, 2U, 0x304U);
+    a.movz(0U, 0U);
+    a.str_w(0U, 2U, 0x308U);
+    a.ldr_w(0U, 2U, 0x90U);
+    a.str_w(0U, 2U, 0x30CU);
+    a.movz(0U, 0U);
+    a.str_x(0U, 2U, 0x310U);
+    const std::vector<std::uint8_t> set_preallocated{
+        1U, 0U, 0U, 0U, 14U, 0U, 0U, 0U
+    };
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Send,
+                      kStage6ScratchAddress + 0x300U, 24U,
+                      set_preallocated);
+    a.ldr_w(0U, 2U, 0x9CU);
+    a.svc(0x21U);
+
+    a.mov64(0U, 1U);
+    a.str_w(0U, 2U, 0x308U);
+    a.mov64(0U, 0x00400000U);
+    a.str_x(0U, 2U, 0x310U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Send,
+                      kStage6ScratchAddress + 0x300U, 24U,
+                      set_preallocated);
+    a.ldr_w(0U, 2U, 0x9CU);
+    a.svc(0x21U);
+
+    const std::vector<std::uint8_t> request_buffer_tx{
+        1U, 0U, 0U, 0U, 1U, 0U, 0U, 0U
+    };
+    a.movz(0U, 0U);
+    a.str_w(0U, 2U, 0x308U);
+    emit_cmif_request_send_receive(
+        a, 0U, kStage6ScratchAddress + 0x300U, 12U,
+        kStage6ScratchAddress + 0x3A0U, 0x80U, request_buffer_tx);
+    a.ldr_w(0U, 2U, 0x9CU);
+    a.svc(0x21U);
 
     emit_named_service_request(a, kSelfTestStringsAddress);
     a.mov_reg(0U, 19U);
@@ -422,13 +621,28 @@ std::vector<std::uint32_t> build_self_test_program() {
 
     a.mov64(15U, kHidMappingAddress + 0x9A28U);
     a.mov64(16U, kSpriteBufferAddress);
-    a.mov64(29U, kFramebufferAddress);
     a.movz(19U, 100U);
     a.movz(18U, 100U);
     a.mov64(17U, 0xFF101820U);
     a.movz(24U, 0U);
 
     a.bind("frame_loop");
+    const std::vector<std::uint8_t> dequeue_tx{
+        1U, 0U, 0U, 0U, 3U, 0U, 0U, 0U
+    };
+    emit_cmif_request_send_receive(
+        a, 0U, kStage6ScratchAddress + 0x350U, 0U,
+        kStage6ScratchAddress + 0x380U, 8U, dequeue_tx);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.ldr_w(0U, 2U, 0x9CU);
+    a.svc(0x21U);
+    a.ldr_w(10U, 2U, 0x384U);
+    a.str_w(10U, 2U, 0xB0U);
+    a.ldr_x(29U, 2U, 0xA0U);
+    a.cbz(10U, "use_framebuffer_slot_zero");
+    a.add_imm(29U, 29U, 4096U, true);
+    a.bind("use_framebuffer_slot_zero");
+
     a.mov_reg(0U, 19U);
     a.mov_reg(1U, 18U);
     a.mov_reg(2U, 17U);
@@ -492,6 +706,22 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.mov_reg(0U, 19U);
     a.mov_reg(1U, 18U);
     a.branch_link("draw_rgba_sprite");
+
+    a.mov64(2U, kStage6ScratchAddress);
+    a.mov64(0U, 0x43524150U);
+    a.str_w(0U, 2U, 0x300U);
+    a.mov64(0U, 1U);
+    a.str_w(0U, 2U, 0x304U);
+    a.ldr_w(0U, 2U, 0xB0U);
+    a.str_w(0U, 2U, 0x308U);
+    const std::vector<std::uint8_t> queue_tx{
+        1U, 0U, 0U, 0U, 7U, 0U, 0U, 0U
+    };
+    emit_cmif_request_send_receive(
+        a, 0U, kStage6ScratchAddress + 0x300U, 12U,
+        kStage6ScratchAddress + 0x3C0U, 4U, queue_tx);
+    a.ldr_w(0U, 2U, 0x9CU);
+    a.svc(0x21U);
     a.branch("frame_loop");
 
     a.bind("draw_solid_sprite_area");
@@ -560,7 +790,7 @@ struct Options {
 
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [file.nro] [--headless]\n"
-              << "  No file: run the built-in SM/HID/fsp-srv RomFS sprite demo.\n"
+              << "  No file: run the built-in vi:m/nvdrv Binder display self-test.\n"
               << "  file.nro: load an uncompressed NRO and its optional ASET RomFS.\n"
               << "  --headless: run without opening an SDL2 window.\n";
 }
@@ -585,7 +815,7 @@ Options parse_options(int argc, char** argv) {
 }
 
 void initialize_machine_memory(horizon::AddressSpace& memory) {
-    memory.map_zeroed(kFramebufferAddress, kFramebufferBytes,
+    memory.map_zeroed(kStage6ScratchAddress, 0x1000U,
                       horizon::Permission::Read | horizon::Permission::Write);
     memory.map_zeroed(kStackAddress, kStackSize,
                       horizon::Permission::Read | horizon::Permission::Write);
@@ -596,14 +826,6 @@ void initialize_machine_memory(horizon::AddressSpace& memory) {
     memory.map_zeroed(kPcmBufferAddress, 0x20000U,
                       horizon::Permission::Read | horizon::Permission::Write);
 
-    std::vector<std::uint8_t> background(kFramebufferBytes, 0U);
-    for (std::size_t offset = 0U; offset < background.size(); offset += 4U) {
-        background[offset] = 0x10U;
-        background[offset + 1U] = 0x18U;
-        background[offset + 2U] = 0x20U;
-        background[offset + 3U] = 0xFFU;
-    }
-    memory.write(kFramebufferAddress, background);
 }
 
 std::uint64_t load_self_test(horizon::AddressSpace& memory) {
@@ -621,14 +843,18 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
         's', 'm', ':', 0U,
         'a', 'u', 'd', 'o', 'u', 't', ':', 'u', 0U,
         0U, 0U, 0U, 0U, 0U, 0U, 0U,
-        'D', 'e', 'v', 'i', 'c', 'e', 'O', 'u', 't', 0U, 0U, 0U, 0U, 0U, 0U, 0U
+        'D', 'e', 'v', 'i', 'c', 'e', 'O', 'u', 't', 0U, 0U, 0U, 0U, 0U, 0U, 0U,
+        'n', 'v', 'd', 'r', 'v', 0U, 0U, 0U,
+        'v', 'i', ':', 'm', 0U, 0U, 0U, 0U,
+        '/', 'd', 'e', 'v', '/', 'n', 'v', 'm', 'a', 'p', 0U,
+        'D', 'e', 'f', 'a', 'u', 'l', 't', 0U
     };
     memory.map(kSelfTestTextAddress, std::move(text),
                horizon::Permission::Read | horizon::Permission::Execute);
     memory.map(kSelfTestStringsAddress, service_strings,
                horizon::Permission::Read);
-    std::cout << "HorizonLite Stage 5 self-test: guest connects to sm:, hid, fsp-srv and audout:u, "
-                 "loads the RomFS sprite, and queues a 440 Hz stereo beep when A/Z is pressed.\n";
+    std::cout << "HorizonLite Stage 6 self-test: guest allocates two nvmap frame slots from its heap, "
+                 "opens vi:m, transacts with IGraphicBufferProducer, and queues the RomFS sprite.\n";
     return kSelfTestTextAddress;
 }
 
@@ -663,22 +889,26 @@ LoadedProgram load_program(const Options& options,
     return LoadedProgram{image.entry_point, image.romfs, false};
 }
 
-void verify_self_test(const horizon::AddressSpace& memory) {
-    const std::uint64_t pixel_address =
-        kFramebufferAddress +
-        (static_cast<std::uint64_t>(101U) * kFramebufferWidth + 101U) * 4U;
+void verify_self_test(std::span<const std::uint8_t> pixels,
+                       std::uint64_t frame_number) {
+    const std::size_t pixel_offset =
+        (static_cast<std::size_t>(101U) * kFramebufferWidth + 101U) * 4U;
     constexpr std::uint32_t expected_rgba = 0xFFF0B842U;
-    const std::uint32_t actual = memory.read_u32(pixel_address);
+    if (pixels.size() < kFramebufferBytes || frame_number == 0U)
+        throw std::runtime_error("Display self-test did not queue a complete framebuffer");
+    const std::uint32_t actual =
+        static_cast<std::uint32_t>(pixels[pixel_offset]) |
+        (static_cast<std::uint32_t>(pixels[pixel_offset + 1U]) << 8U) |
+        (static_cast<std::uint32_t>(pixels[pixel_offset + 2U]) << 16U) |
+        (static_cast<std::uint32_t>(pixels[pixel_offset + 3U]) << 24U);
     if (actual != expected_rgba) {
-        std::cerr << "  Sprite pixel (0,0): 0x" << std::hex
-                  << memory.read_u32(kSpriteBufferAddress)
-                  << "  Sprite pixel (1,1): 0x"
-                  << memory.read_u32(kSpriteBufferAddress + 68U)
-                  << "  Framebuffer probe: 0x" << actual << std::dec << '\n';
-        throw std::runtime_error("RomFS sprite self-test failed: guest did not draw expected RGBA pixel");
+        std::cerr << "  Display pixel probe: 0x" << std::hex
+                  << actual << std::dec << '\n';
+        throw std::runtime_error("vi:m/nvmap QueueBuffer did not present the expected guest sprite pixel");
     }
-    std::cout << "RomFS/fsp-srv/HIPC sprite self-test passed\n"
-              << "  RomFS sprite pixel: 0x" << std::hex << actual << std::dec << '\n';
+    std::cout << "vi:m + nvdrv/nvmap + Binder QueueBuffer self-test passed\n"
+              << "  Presented sprite pixel: 0x" << std::hex << actual << std::dec
+              << "  Frames: " << frame_number << '\n';
 }
 
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
@@ -690,7 +920,7 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         std::cout << "Executed guest instructions: " << executed << '\n';
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         kernel.update_audio_events();
-        verify_self_test(memory);
+        verify_self_test(kernel.display_pixels(), kernel.display_frame_number());
         return 0;
     }
 
@@ -718,8 +948,9 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         if (kernel.running())
             (void)cpu.run(kInteractiveInstructionBudget, kStopAddress);
         kernel.update_audio_events();
-        display.render(memory, kFramebufferAddress,
+        display.render(kernel.display_pixels(),
                        kFramebufferWidth, kFramebufferHeight);
+        kernel.signal_vsync();
         std::this_thread::sleep_until(frame_start + frame_duration);
     }
     return 0;
