@@ -13,6 +13,7 @@ add_executable(horizonlite
     src/nro_loader.cpp
     src/cpu.cpp
     src/kernel.cpp
+    src/audio.cpp
     src/romfs.cpp
     src/display.cpp
 )
@@ -41,9 +42,20 @@ add_executable(horizonlite_cpu_test
     src/memory.cpp
     src/cpu.cpp
     src/kernel.cpp
+    src/audio.cpp
 )
 target_include_directories(horizonlite_cpu_test PRIVATE include)
 target_compile_features(horizonlite_cpu_test PRIVATE cxx_std_20)
+
+if(TARGET SDL2::SDL2)
+    target_link_libraries(horizonlite_cpu_test PRIVATE SDL2::SDL2)
+elseif(TARGET SDL2::SDL2-static)
+    target_link_libraries(horizonlite_cpu_test PRIVATE SDL2::SDL2-static)
+elseif(TARGET PkgConfig::SDL2)
+    target_link_libraries(horizonlite_cpu_test PRIVATE PkgConfig::SDL2)
+else()
+    message(FATAL_ERROR "SDL2 target is required by horizonlite_cpu_test")
+endif()
 
 if(MSVC)
     target_compile_options(horizonlite_cpu_test PRIVATE /W4 /permissive-)
