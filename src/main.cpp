@@ -647,7 +647,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.str_w(10U, 2U, 0xB0U);
     a.ldr_x(29U, 2U, 0xA0U);
     a.cbz(10U, "use_framebuffer_slot_zero");
-    a.add_imm(29U, 29U, 4096U, true);
+    a.add_imm(29U, 29U, 0x00400000U, true);
     a.bind("use_framebuffer_slot_zero");
 
     a.mov_reg(0U, 19U);
