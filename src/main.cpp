@@ -422,6 +422,12 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.ldr_w(10U, 20U, 12U);
     a.str_w(10U, 2U, 0x98U);
 
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0x98U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0x98U);
+
     emit_cmif_request(a, 1010U, IpcDescriptorKind::Send,
                       kSelfTestStringsAddress + 80U, 8U);
     a.ldr_w(0U, 2U, 0x98U);
