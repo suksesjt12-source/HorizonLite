@@ -404,6 +404,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.add_reg(3U, 3U, 4U);
     a.add_reg(6U, 29U, 3U);
     a.movz(12U, 16U);
+    a.movz(5U, 5120U);
     a.bind("solid_row");
     a.mov_reg(11U, 6U);
     a.movz(13U, 16U);
@@ -412,8 +413,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.add_imm(11U, 11U, 4U);
     a.subs_imm(13U, 13U, 1U);
     a.bcond(1U, "solid_column");
-    a.add_imm(6U, 6U, 4096U, true);
-    a.add_imm(6U, 6U, 1024U);
+    a.add_reg(6U, 6U, 5U);
     a.subs_imm(12U, 12U, 1U);
     a.bcond(1U, "solid_row");
     a.ret();
@@ -429,6 +429,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.add_reg(6U, 29U, 3U);
     a.mov_reg(7U, 16U);
     a.movz(12U, 16U);
+    a.movz(5U, 5120U);
     a.bind("sprite_row");
     a.mov_reg(11U, 6U);
     a.mov_reg(13U, 7U);
@@ -442,8 +443,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.add_imm(11U, 11U, 4U);
     a.subs_imm(14U, 14U, 1U);
     a.bcond(1U, "sprite_column");
-    a.add_imm(6U, 6U, 4096U, true);
-    a.add_imm(6U, 6U, 1024U);
+    a.add_reg(6U, 6U, 5U);
     a.add_imm(7U, 7U, 64U);
     a.subs_imm(12U, 12U, 1U);
     a.bcond(1U, "sprite_row");
