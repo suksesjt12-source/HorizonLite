@@ -18,7 +18,7 @@ SdlDisplay::SdlDisplay() {
                                1280, 720, SDL_WINDOW_SHOWN);
     if (window_ == nullptr) {
         const std::string error = SDL_GetError();
-        SDL_Quit();
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
         sdl_initialized_ = false;
         throw std::runtime_error("SDL_CreateWindow failed: " + error);
     }
@@ -31,7 +31,7 @@ SdlDisplay::SdlDisplay() {
         const std::string error = SDL_GetError();
         SDL_DestroyWindow(window_);
         window_ = nullptr;
-        SDL_Quit();
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
         sdl_initialized_ = false;
         throw std::runtime_error("SDL_CreateRenderer failed: " + error);
     }
@@ -44,7 +44,7 @@ SdlDisplay::SdlDisplay() {
         SDL_DestroyWindow(window_);
         renderer_ = nullptr;
         window_ = nullptr;
-        SDL_Quit();
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
         sdl_initialized_ = false;
         throw std::runtime_error("SDL_CreateTexture failed: " + error);
     }
