@@ -60,12 +60,17 @@ std::uint64_t expand_fp_immediate(std::uint8_t immediate,
     return (sign << 63U) | (exponent << 52U) | fraction;
 }
 
-std::int64_t float_to_signed_integer(double value) noexcept {
+std::int64_t float_to_signed_integer(double value,
+                                          unsigned destination_width) noexcept {
     if (std::isnan(value)) return 0;
-    if (value >= static_cast<double>(std::numeric_limits<std::int64_t>::max()))
-        return std::numeric_limits<std::int64_t>::max();
-    if (value <= static_cast<double>(std::numeric_limits<std::int64_t>::min()))
-        return std::numeric_limits<std::int64_t>::min();
+    const std::int64_t minimum = destination_width == 32U
+        ? static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())
+        : std::numeric_limits<std::int64_t>::min();
+    const std::int64_t maximum = destination_width == 32U
+        ? static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())
+        : std::numeric_limits<std::int64_t>::max();
+    if (value >= static_cast<double>(maximum)) return maximum;
+    if (value <= static_cast<double>(minimum)) return minimum;
     return static_cast<std::int64_t>(std::trunc(value));
 }
 
@@ -540,7 +545,8 @@ void Arm64Cpu::step() {
             ? std::bit_cast<double>(state_.v[rn])
             : static_cast<double>(std::bit_cast<float>(
                 static_cast<std::uint32_t>(state_.v[rn])));
-        const std::int64_t converted = float_to_signed_integer(value);
+        const std::int64_t converted = float_to_signed_integer(
+            value, destination_wide ? 64U : 32U);
         if (destination_wide) write_x(rd, static_cast<std::uint64_t>(converted));
         else write_x(rd, static_cast<std::uint32_t>(converted));
         return;
