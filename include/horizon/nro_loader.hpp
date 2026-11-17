@@ -17,9 +17,10 @@ struct NroSegment {
 struct NroImage {
     std::uint32_t declared_size{};
     std::uint32_t flags{};
-    std::array<NroSegment, 3> segments{}; // .text, .rodata, .data
+    std::array<NroSegment, 3> segments{};
     std::uint32_t bss_size{};
     std::uint64_t entry_point{};
+    std::vector<std::uint8_t> romfs;
 };
 
 class NroLoader {

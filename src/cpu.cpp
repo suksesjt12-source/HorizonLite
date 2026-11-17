@@ -327,19 +327,25 @@ void Arm64Cpu::step() {
     const bool load64 = memory_class == 0xF9400000U;
     const bool store32 = memory_class == 0xB9000000U;
     const bool load32 = memory_class == 0xB9400000U;
-    if (store64 || load64 || store32 || load32) {
+    const bool store8 = memory_class == 0x39000000U;
+    const bool load8 = memory_class == 0x39400000U;
+    if (store64 || load64 || store32 || load32 || store8 || load8) {
         const bool wide = store64 || load64;
-        const bool is_load = load64 || load32;
+        const bool byte = store8 || load8;
+        const bool is_load = load64 || load32 || load8;
         const unsigned rt = instruction & 0x1FU;
         const unsigned rn = (instruction >> 5U) & 0x1FU;
         const std::uint64_t encoded_offset = (instruction >> 10U) & 0xFFFU;
-        const std::uint64_t address =
-            read_base(rn) + (encoded_offset << (wide ? 3U : 2U));
+        const unsigned scale = wide ? 3U : (byte ? 0U : 2U);
+        const std::uint64_t address = read_base(rn) + (encoded_offset << scale);
         if (is_load) {
             if (wide) write_x(rt, memory_.read_u64(address));
+            else if (byte) write_x(rt, memory_.read_u8(address));
             else write_x(rt, memory_.read_u32(address));
         } else if (wide) {
             memory_.write_u64(address, read_x(rt));
+        } else if (byte) {
+            memory_.write_u8(address, static_cast<std::uint8_t>(read_x(rt)));
         } else {
             memory_.write_u32(address, static_cast<std::uint32_t>(read_x(rt)));
         }
