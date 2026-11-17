@@ -632,7 +632,12 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
             return;
         }
         if (response.result != kSuccess) {
-            std::cerr << "[HorizonKernel] IPC command " << request.command_id
+            std::cerr << "[HorizonKernel] IPC ";
+            if (object->kind() == KernelObjectKind::ClientSession)
+                std::cerr << std::static_pointer_cast<KClientSession>(object)->service_name();
+            else
+                std::cerr << "object";
+            std::cerr << " command " << request.command_id
                       << " returned 0x" << std::hex << response.result
                       << std::dec << '\n';
         }
@@ -1527,6 +1532,16 @@ std::size_t HorizonKernel::run_scheduler(
 
         if (executed == 0U && thread->status == ThreadStatus::Runnable)
             break;
+    }
+    if (executed_total < max_instructions && main_thread_ &&
+        main_thread_->status != ThreadStatus::Runnable) {
+        std::cerr << "[Scheduler] stopped after " << executed_total
+                  << " instructions; states:";
+        for (const auto& thread : threads_)
+            std::cerr << " handle=" << thread->handle
+                      << " status=" << static_cast<unsigned>(thread->status)
+                      << " pc=0x" << std::hex << thread->context.pc << std::dec;
+        std::cerr << '\\n';
     }
     return executed_total;
 }
