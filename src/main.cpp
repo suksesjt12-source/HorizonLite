@@ -1050,7 +1050,7 @@ void verify_self_test(const horizon::AddressSpace& memory,
     }
     std::cout << "vi:m + nvdrv/nvmap + Binder QueueBuffer + worker-thread motion self-test passed\n"
               << "  Worker position: " << worker_position
-              << "  Frames: " << frame_number << '\\n';
+              << "  Frames: " << frame_number << '\n';
 }
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                  const horizon::AddressSpace& memory, bool self_test) {
