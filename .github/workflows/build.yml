@@ -1,4 +1,4 @@
-name: C++ build and smoke test
+name: C++ build and SDL2 self-test
 
 on:
   push:
@@ -10,11 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install SDL2 development package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libsdl2-dev
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel 2
-      - name: Create synthetic NRO fixture
-        run: python3 tools/make_test_nro.py
-      - name: Run parser and interpreter smoke test
-        run: ./build/horizonlite test_homebrew.nro --run
+      - name: Run CPU, SVC and framebuffer tests
+        run: ctest --test-dir build --output-on-failure

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace horizon {
@@ -34,8 +35,16 @@ public:
     [[nodiscard]] std::vector<std::uint8_t> read(
         std::uint64_t address, std::size_t size,
         Permission access = Permission::Read) const;
+    [[nodiscard]] std::span<const std::uint8_t> view(
+        std::uint64_t address, std::size_t size,
+        Permission access = Permission::Read) const;
     void write(std::uint64_t address, const std::vector<std::uint8_t>& bytes);
+    void write_u32(std::uint64_t address, std::uint32_t value);
+    void write_u64(std::uint64_t address, std::uint64_t value);
     [[nodiscard]] std::uint32_t read_u32(
+        std::uint64_t address,
+        Permission access = Permission::Read) const;
+    [[nodiscard]] std::uint64_t read_u64(
         std::uint64_t address,
         Permission access = Permission::Read) const;
 

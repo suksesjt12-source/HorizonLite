@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace horizon {
 
@@ -86,10 +87,16 @@ AddressSpace::Region& AddressSpace::find_region(
 std::vector<std::uint8_t> AddressSpace::read(std::uint64_t address,
                                             std::size_t size,
                                             Permission access) const {
+    const std::span<const std::uint8_t> bytes = view(address, size, access);
+    return {bytes.begin(), bytes.end()};
+}
+
+std::span<const std::uint8_t> AddressSpace::view(std::uint64_t address,
+                                                 std::size_t size,
+                                                 Permission access) const {
     const Region& region = find_region(address, size, access);
     const std::size_t offset = static_cast<std::size_t>(address - region.base);
-    return {region.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
-            region.bytes.begin() + static_cast<std::ptrdiff_t>(offset + size)};
+    return std::span<const std::uint8_t>(region.bytes.data() + offset, size);
 }
 
 void AddressSpace::write(std::uint64_t address,
@@ -100,13 +107,46 @@ void AddressSpace::write(std::uint64_t address,
               region.bytes.begin() + static_cast<std::ptrdiff_t>(offset));
 }
 
+void AddressSpace::write_u32(std::uint64_t address, std::uint32_t value) {
+    Region& region = find_region(address, sizeof(value), Permission::Write);
+    const std::size_t offset = static_cast<std::size_t>(address - region.base);
+    for (unsigned byte = 0; byte < 4U; ++byte) {
+        region.bytes[offset + byte] =
+            static_cast<std::uint8_t>((value >> (byte * 8U)) & 0xFFU);
+    }
+}
+
+void AddressSpace::write_u64(std::uint64_t address, std::uint64_t value) {
+    Region& region = find_region(address, sizeof(value), Permission::Write);
+    const std::size_t offset = static_cast<std::size_t>(address - region.base);
+    for (unsigned byte = 0; byte < 8U; ++byte) {
+        region.bytes[offset + byte] =
+            static_cast<std::uint8_t>((value >> (byte * 8U)) & 0xFFU);
+    }
+}
+
 std::uint32_t AddressSpace::read_u32(std::uint64_t address,
                                      Permission access) const {
-    const auto bytes = read(address, 4, access);
-    return static_cast<std::uint32_t>(bytes[0]) |
-           (static_cast<std::uint32_t>(bytes[1]) << 8U) |
-           (static_cast<std::uint32_t>(bytes[2]) << 16U) |
-           (static_cast<std::uint32_t>(bytes[3]) << 24U);
+    const Region& region = find_region(address, sizeof(std::uint32_t), access);
+    const std::size_t offset = static_cast<std::size_t>(address - region.base);
+    std::uint32_t value = 0;
+    for (unsigned byte = 0; byte < 4U; ++byte) {
+        value |= static_cast<std::uint32_t>(region.bytes[offset + byte])
+                 << (byte * 8U);
+    }
+    return value;
+}
+
+std::uint64_t AddressSpace::read_u64(std::uint64_t address,
+                                     Permission access) const {
+    const Region& region = find_region(address, sizeof(std::uint64_t), access);
+    const std::size_t offset = static_cast<std::size_t>(address - region.base);
+    std::uint64_t value = 0;
+    for (unsigned byte = 0; byte < 8U; ++byte) {
+        value |= static_cast<std::uint64_t>(region.bytes[offset + byte])
+                 << (byte * 8U);
+    }
+    return value;
 }
 
 std::size_t AddressSpace::region_count() const noexcept {
