@@ -143,7 +143,8 @@ HorizonKernel::HorizonKernel(AddressSpace& memory)
       hid_shared_memory_(std::make_shared<KSharedMemory>(kHidSharedMemorySize)) {
     auto sm_port = std::make_shared<KPort>("sm:");
     (void)handles_.insert(sm_port);
-    ports_.emplace(sm_port->name(), std::move(sm_port));
+    const std::string sm_port_name = sm_port->name();
+    ports_.emplace(sm_port_name, sm_port);
 
     write_le64(hid_shared_memory_->bytes, kNpadAreaOffset, 0U);
     write_le64(hid_shared_memory_->bytes, kNpadAreaOffset + 8U, 1U);
