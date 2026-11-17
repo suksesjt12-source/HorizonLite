@@ -120,14 +120,18 @@ NroImage NroLoader::parse(const std::vector<std::uint8_t>& file) {
         }
     }
 
-    image.entry_point = image.segments[0].file_offset;
+    image.entry_point = kMinimumNroSize;
     extract_romfs_asset(file, image);
     return image;
 }
 
 NroImage NroLoader::load(const std::vector<std::uint8_t>& file,
-                         AddressSpace& memory) {
-    const NroImage image = parse(file);
+                         AddressSpace& memory, std::uint64_t load_base) {
+    NroImage image = parse(file);
+    image.load_base = load_base;
+    if (load_base > std::numeric_limits<std::uint64_t>::max() - image.entry_point)
+        throw std::overflow_error("NRO entry point address overflows");
+    image.entry_point += load_base;
     constexpr std::array<Permission, 3> permissions{
         Permission::Read | Permission::Execute,
         Permission::Read,
@@ -137,17 +141,22 @@ NroImage NroLoader::load(const std::vector<std::uint8_t>& file,
     for (std::size_t i = 0; i < image.segments.size(); ++i) {
         const NroSegment& segment = image.segments[i];
         if (segment.size == 0U) continue;
+        if (segment.file_offset > std::numeric_limits<std::uint64_t>::max() - load_base)
+            throw std::overflow_error("NRO segment address overflows");
         const auto first = file.begin() + static_cast<std::ptrdiff_t>(segment.file_offset);
         const auto last = first + static_cast<std::ptrdiff_t>(segment.size);
-        memory.map(segment.file_offset, std::vector<std::uint8_t>(first, last),
-                   permissions[i]);
+        memory.map(load_base + segment.file_offset,
+                   std::vector<std::uint8_t>(first, last), permissions[i]);
     }
 
     const NroSegment& data = image.segments[2];
     if (image.bss_size != 0U) {
-        const std::uint64_t bss_base =
+        const std::uint64_t relative_bss_base =
             static_cast<std::uint64_t>(data.file_offset) + data.size;
-        memory.map_zeroed(bss_base, image.bss_size,
+        if (relative_bss_base > std::numeric_limits<std::uint64_t>::max() - load_base)
+            throw std::overflow_error("NRO BSS address overflows");
+        image.bss_base = load_base + relative_bss_base;
+        memory.map_zeroed(image.bss_base, image.bss_size,
                           Permission::Read | Permission::Write);
     }
     return image;
