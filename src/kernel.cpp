@@ -432,7 +432,7 @@ void HorizonKernel::update_main_thread_context(const CpuState& state) {
 }
 
 void HorizonKernel::request_applet_exit() noexcept {
-    if (!applet_event_ || !applet_exit_requested_) {
+    if (!applet_exit_requested_) {
         applet_messages_.push(4U);
         applet_exit_requested_ = true;
     }
@@ -1304,11 +1304,6 @@ CmifResponse HorizonKernel::dispatch_cmif(
         return dispatch_audio_manager(request);
     }
 
-    if (session.service_name() == "appletOE" ||
-        session.service_name().starts_with("I") ||
-        session.service_name().starts_with("generic_stub:"))
-        return dispatch_applet_service(session.service_name(), request);
-
     if (session.service_name() == "time:u" ||
         session.service_name() == "time:s" ||
         session.service_name() == "time:a" ||
@@ -1316,6 +1311,17 @@ CmifResponse HorizonKernel::dispatch_cmif(
         session.service_name() == "ISteadyClock" ||
         session.service_name() == "ITimeZoneService")
         return dispatch_time_service(session.service_name(), request);
+
+    if (session.service_name() == "appletOE" ||
+        session.service_name() == "IApplicationProxy" ||
+        session.service_name() == "ICommonStateGetter" ||
+        session.service_name() == "ISelfController" ||
+        session.service_name() == "IWindowController" ||
+        session.service_name() == "IApplicationFunctions" ||
+        session.service_name() == "IAudioController" ||
+        session.service_name() == "IDisplayController" ||
+        session.service_name().starts_with("generic_stub:"))
+        return dispatch_applet_service(session.service_name(), request);
 
     if (session.service_name() == "acc:u0")
         return dispatch_account(request);
