@@ -99,6 +99,8 @@ struct Uid {
     friend bool operator==(const Uid&, const Uid&) = default;
 };
 
+class KFile;
+
 class KProfile final : public KObject {
 public:
     KProfile();
