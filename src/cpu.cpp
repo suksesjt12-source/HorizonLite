@@ -164,6 +164,18 @@ void Arm64Cpu::step() {
         return;
     }
 
+    if ((instruction & 0x7F800000U) == 0x12800000U) {
+        const unsigned width = (instruction >> 31U) != 0U ? 64U : 32U;
+        const unsigned hw = (instruction >> 21U) & 0x3U;
+        const unsigned shift = hw * 16U;
+        if (width == 32U && shift >= 32U)
+            throw std::runtime_error("invalid 32-bit MOVN shift");
+        const std::uint64_t immediate =
+            static_cast<std::uint64_t>((instruction >> 5U) & 0xFFFFU) << shift;
+        write_x(instruction & 0x1FU, (~immediate) & width_mask(width));
+        return;
+    }
+
     if ((instruction & 0xFF800000U) == 0xD2800000U) {
         const unsigned hw = (instruction >> 21U) & 0x3U;
         const std::uint64_t immediate = (instruction >> 5U) & 0xFFFFU;
@@ -329,21 +341,28 @@ void Arm64Cpu::step() {
     const bool load32 = memory_class == 0xB9400000U;
     const bool store8 = memory_class == 0x39000000U;
     const bool load8 = memory_class == 0x39400000U;
-    if (store64 || load64 || store32 || load32 || store8 || load8) {
+    const bool store16 = memory_class == 0x79000000U;
+    const bool load16 = memory_class == 0x79400000U;
+    if (store64 || load64 || store32 || load32 || store8 || load8 ||
+        store16 || load16) {
         const bool wide = store64 || load64;
+        const bool halfword = store16 || load16;
         const bool byte = store8 || load8;
-        const bool is_load = load64 || load32 || load8;
+        const bool is_load = load64 || load32 || load8 || load16;
         const unsigned rt = instruction & 0x1FU;
         const unsigned rn = (instruction >> 5U) & 0x1FU;
         const std::uint64_t encoded_offset = (instruction >> 10U) & 0xFFFU;
-        const unsigned scale = wide ? 3U : (byte ? 0U : 2U);
+        const unsigned scale = wide ? 3U : (halfword ? 1U : (byte ? 0U : 2U));
         const std::uint64_t address = read_base(rn) + (encoded_offset << scale);
         if (is_load) {
             if (wide) write_x(rt, memory_.read_u64(address));
+            else if (halfword) write_x(rt, memory_.read_u16(address));
             else if (byte) write_x(rt, memory_.read_u8(address));
             else write_x(rt, memory_.read_u32(address));
         } else if (wide) {
             memory_.write_u64(address, read_x(rt));
+        } else if (halfword) {
+            memory_.write_u16(address, static_cast<std::uint16_t>(read_x(rt)));
         } else if (byte) {
             memory_.write_u8(address, static_cast<std::uint8_t>(read_x(rt)));
         } else {
