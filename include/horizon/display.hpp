@@ -3,6 +3,7 @@
 #include "horizon/memory.hpp"
 
 #include <SDL.h>
+#include <cstdint>
 
 namespace horizon {
 
@@ -15,6 +16,7 @@ public:
     SdlDisplay& operator=(const SdlDisplay&) = delete;
 
     [[nodiscard]] bool process_events() const;
+    [[nodiscard]] std::uint64_t read_controller_buttons() const;
     void render(const AddressSpace& memory, std::uint64_t framebuffer_address,
                 int width, int height);
 

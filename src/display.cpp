@@ -1,5 +1,7 @@
 #include "horizon/display.hpp"
 
+#include "horizon/kernel.hpp"
+
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -7,12 +9,11 @@
 namespace horizon {
 
 SdlDisplay::SdlDisplay() {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
         throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
-    }
     sdl_initialized_ = true;
 
-    window_ = SDL_CreateWindow("HorizonLite - Linear Framebuffer",
+    window_ = SDL_CreateWindow("HorizonLite Stage 3 - IPC + HID",
                                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                1280, 720, SDL_WINDOW_SHOWN);
     if (window_ == nullptr) {
@@ -24,9 +25,8 @@ SdlDisplay::SdlDisplay() {
 
     renderer_ = SDL_CreateRenderer(
         window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (renderer_ == nullptr) {
+    if (renderer_ == nullptr)
         renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
-    }
     if (renderer_ == nullptr) {
         const std::string error = SDL_GetError();
         SDL_DestroyWindow(window_);
@@ -61,18 +61,40 @@ SdlDisplay::~SdlDisplay() {
 bool SdlDisplay::process_events() const {
     SDL_Event event{};
     while (SDL_PollEvent(&event) != 0) {
-        if (event.type == SDL_QUIT) {
-            return false;
-        }
+        if (event.type == SDL_QUIT) return false;
         if (event.type == SDL_WINDOWEVENT &&
-            event.window.event == SDL_WINDOWEVENT_CLOSE) {
+            event.window.event == SDL_WINDOWEVENT_CLOSE) return false;
+        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)
             return false;
-        }
-        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
-            return false;
-        }
     }
     return true;
+}
+
+std::uint64_t SdlDisplay::read_controller_buttons() const {
+    int key_count = 0;
+    const Uint8* keys = SDL_GetKeyboardState(&key_count);
+    const auto down = [keys, key_count](SDL_Scancode code) {
+        const int index = static_cast<int>(code);
+        return keys != nullptr && index >= 0 && index < key_count && keys[index] != 0U;
+    };
+
+    std::uint64_t buttons = 0U;
+    if (down(SDL_SCANCODE_Z)) buttons |= HidButtonA;
+    if (down(SDL_SCANCODE_X)) buttons |= HidButtonB;
+    if (down(SDL_SCANCODE_A)) buttons |= HidButtonX;
+    if (down(SDL_SCANCODE_S)) buttons |= HidButtonY;
+    if (down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_KP_ENTER))
+        buttons |= HidButtonPlus;
+
+    if (down(SDL_SCANCODE_LEFT) || down(SDL_SCANCODE_A))
+        buttons |= HidDpadLeft;
+    if (down(SDL_SCANCODE_UP) || down(SDL_SCANCODE_W))
+        buttons |= HidDpadUp;
+    if (down(SDL_SCANCODE_RIGHT) || down(SDL_SCANCODE_D))
+        buttons |= HidDpadRight;
+    if (down(SDL_SCANCODE_DOWN) || down(SDL_SCANCODE_S))
+        buttons |= HidDpadDown;
+    return buttons;
 }
 
 void SdlDisplay::render(const AddressSpace& memory,
@@ -85,14 +107,12 @@ void SdlDisplay::render(const AddressSpace& memory,
 
     void* texture_pixels = nullptr;
     int texture_pitch = 0;
-    if (SDL_LockTexture(texture_, nullptr, &texture_pixels, &texture_pitch) != 0) {
-        throw std::runtime_error(std::string("SDL_LockTexture failed: ") +
-                                 SDL_GetError());
-    }
+    if (SDL_LockTexture(texture_, nullptr, &texture_pixels, &texture_pitch) != 0)
+        throw std::runtime_error(std::string("SDL_LockTexture failed: ") + SDL_GetError());
+
     const std::size_t row_bytes = static_cast<std::size_t>(width) * 4U;
     for (int row = 0; row < height; ++row) {
-        const auto* source = pixels.data() +
-            static_cast<std::size_t>(row) * row_bytes;
+        const auto* source = pixels.data() + static_cast<std::size_t>(row) * row_bytes;
         auto* destination = static_cast<std::uint8_t*>(texture_pixels) +
             static_cast<std::size_t>(row) * static_cast<std::size_t>(texture_pitch);
         std::memcpy(destination, source, row_bytes);
@@ -100,10 +120,8 @@ void SdlDisplay::render(const AddressSpace& memory,
     SDL_UnlockTexture(texture_);
 
     if (SDL_RenderClear(renderer_) != 0 ||
-        SDL_RenderCopy(renderer_, texture_, nullptr, nullptr) != 0) {
-        throw std::runtime_error(std::string("SDL render operation failed: ") +
-                                 SDL_GetError());
-    }
+        SDL_RenderCopy(renderer_, texture_, nullptr, nullptr) != 0)
+        throw std::runtime_error(std::string("SDL render operation failed: ") + SDL_GetError());
     SDL_RenderPresent(renderer_);
 }
 

@@ -13,6 +13,7 @@ struct CpuState {
     std::uint64_t x[31]{};
     std::uint64_t sp{};
     std::uint64_t pc{};
+    std::uint64_t tpidrro_el0{0x10000000ULL};
     std::uint32_t pstate{};
 };
 
