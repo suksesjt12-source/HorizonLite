@@ -388,7 +388,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.movz(2U, 55U);
     a.movz(3U, 0U);
     a.movz(4U, 8000U);
-    a.movn_w(5U, 0x1F40U);
+    a.movn_w(5U, 0x1F3FU);
     a.movz(6U, 1U);
     a.bind("beep_frame");
     a.cbz(1U, "beep_done");
@@ -684,10 +684,12 @@ void verify_self_test(const horizon::AddressSpace& memory) {
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                  const horizon::AddressSpace& memory, bool self_test) {
     if (self_test) {
-        kernel.update_hid_input(0U);
+        kernel.update_hid_input(horizon::HidButtonA);
         const std::size_t executed =
             cpu.run(kHeadlessInstructionLimit, kStopAddress);
         std::cout << "Executed guest instructions: " << executed << '\n';
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        kernel.update_audio_events();
         verify_self_test(memory);
         return 0;
     }
@@ -712,8 +714,10 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         if (!keep_open) break;
 
         kernel.update_hid_input(display.read_controller_buttons());
+        kernel.update_audio_events();
         if (kernel.running())
             (void)cpu.run(kInteractiveInstructionBudget, kStopAddress);
+        kernel.update_audio_events();
         display.render(memory, kFramebufferAddress,
                        kFramebufferWidth, kFramebufferHeight);
         std::this_thread::sleep_until(frame_start + frame_duration);
@@ -729,8 +733,9 @@ int main(int argc, char** argv) {
         horizon::AddressSpace memory;
         initialize_machine_memory(memory);
         LoadedProgram program = load_program(options, memory);
+        horizon::SdlAudioOutput audio(options.headless);
 
-        horizon::HorizonKernel kernel(memory, std::move(program.romfs));
+        horizon::HorizonKernel kernel(memory, std::move(program.romfs), audio);
         horizon::SvcHandler svc_handler(kernel);
         horizon::Arm64Cpu cpu(memory, svc_handler);
         cpu.state().pc = program.entry_point;
