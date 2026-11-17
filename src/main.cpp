@@ -3,17 +3,18 @@
 #include "horizon/kernel.hpp"
 #include "horizon/nro_loader.hpp"
 
-#include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -27,42 +28,289 @@ constexpr std::size_t kFramebufferBytes =
     static_cast<std::size_t>(kFramebufferHeight) * 4U;
 constexpr std::uint64_t kStackAddress = 0x60000000ULL;
 constexpr std::size_t kStackSize = 1024U * 1024U;
+constexpr std::uint64_t kTlsAddress = 0x10000000ULL;
+constexpr std::size_t kTlsSize = 0x1000U;
 constexpr std::uint64_t kSelfTestTextAddress = 0x00100000ULL;
-constexpr std::uint64_t kSelfTestMessageAddress = 0x00110000ULL;
+constexpr std::uint64_t kSelfTestPortNameAddress = 0x00110000ULL;
+constexpr std::uint64_t kHidMappingAddress = 0x20000000ULL;
 constexpr std::uint64_t kStopAddress = std::numeric_limits<std::uint64_t>::max();
-constexpr std::size_t kInteractiveInstructionBudget = 250000U;
-constexpr std::size_t kHeadlessInstructionLimit = 20000000U;
+constexpr std::size_t kInteractiveInstructionBudget = 180000U;
+constexpr std::size_t kHeadlessInstructionLimit = 1000000U;
 
-constexpr char kSelfTestMessage[] =
-    "HorizonLite Stage 2: SVC + RGBA framebuffer\n";
+class A64Assembler {
+public:
+    void emit(std::uint32_t instruction) { words_.push_back(instruction); }
 
-// Raw AArch64 instruction words. The loop stores one RGBA8888 pixel per pass.
-// Register assignments: X19=framebuffer pointer, X20=pixel index,
-// X22=pixel color, X23=color increment, X24=pixel count (1280*720).
-constexpr std::array<std::uint32_t, 22> kSelfTestProgram{
-    0xD2840001U, // MOVZ X1, #0x2000
-    0xD4000021U, // SVC #0x01 (SetHeapSize)
-    0xD2800000U, // MOVZ X0, #0
-    0xF2A00220U, // MOVK X0, #0x0011, LSL #16  -> 0x00110000
-    0xD2800581U, // MOVZ X1, #44
-    0xD40004E1U, // SVC #0x27 (OutputDebugString)
-    0xD2800013U, // MOVZ X19, #0
-    0xF2A80013U, // MOVK X19, #0x4000, LSL #16 -> 0x40000000
-    0xD2800014U, // MOVZ X20, #0
-    0xD2800016U, // MOVZ X22, #0
-    0xF2BFE016U, // MOVK X22, #0xFF00, LSL #16 -> 0xFF000000
-    0xD2800037U, // MOVZ X23, #1
-    0xF2A00017U, // MOVK X23, #0, LSL #16 -> color increment remains 1
-    0xD2820018U, // MOVZ X24, #0x1000
-    0xF2A001D8U, // MOVK X24, #0x000E, LSL #16 -> 0x000E1000
-    0xB9000276U, // STR W22, [X19]
-    0x91001273U, // ADD X19, X19, #4
-    0x91000694U, // ADD X20, X20, #1
-    0x8B1702D6U, // ADD X22, X22, X23
-    0xEB18029FU, // CMP X20, X24 (SUBS XZR, X20, X24)
-    0x54FFFF61U, // B.NE back five instructions to STR W22, [X19]
-    0xD40000E1U, // SVC #0x07 (ExitProcess)
+    void bind(const std::string& label) {
+        if (labels_.contains(label)) throw std::runtime_error("duplicate assembly label: " + label);
+        labels_.emplace(label, words_.size());
+    }
+
+    void movz(unsigned rd, std::uint16_t immediate, unsigned shift = 0U) {
+        emit(0xD2800000U | ((shift / 16U) << 21U) |
+             (static_cast<std::uint32_t>(immediate) << 5U) | rd);
+    }
+
+    void movk(unsigned rd, std::uint16_t immediate, unsigned shift = 0U) {
+        emit(0xF2800000U | ((shift / 16U) << 21U) |
+             (static_cast<std::uint32_t>(immediate) << 5U) | rd);
+    }
+
+    void mov64(unsigned rd, std::uint64_t value) {
+        movz(rd, static_cast<std::uint16_t>(value));
+        for (unsigned shift = 16U; shift < 64U; shift += 16U) {
+            const auto part = static_cast<std::uint16_t>(value >> shift);
+            if (part != 0U) movk(rd, part, shift);
+        }
+    }
+
+    void mov_reg(unsigned rd, unsigned rm) {
+        emit(0xAA0003E0U | (rm << 16U) | rd);
+    }
+
+    void add_imm(unsigned rd, unsigned rn, unsigned immediate,
+                 bool shift12 = false) {
+        const unsigned encoded = shift12 ? immediate / 4096U : immediate;
+        emit(0x91000000U | (static_cast<std::uint32_t>(shift12) << 22U) |
+             (encoded << 10U) | (rn << 5U) | rd);
+    }
+
+    void sub_imm(unsigned rd, unsigned rn, unsigned immediate) {
+        emit(0xD1000000U | (immediate << 10U) | (rn << 5U) | rd);
+    }
+
+    void subs_imm(unsigned rd, unsigned rn, unsigned immediate) {
+        emit(0xF1000000U | (immediate << 10U) | (rn << 5U) | rd);
+    }
+
+    void add_reg(unsigned rd, unsigned rn, unsigned rm) {
+        emit(0x8B000000U | (rm << 16U) | (rn << 5U) | rd);
+    }
+
+    void lsl(unsigned rd, unsigned rn, unsigned amount) {
+        const unsigned immr = (64U - amount) & 63U;
+        const unsigned imms = 63U - amount;
+        emit(0xD3400000U | (immr << 16U) | (imms << 10U) |
+             (rn << 5U) | rd);
+    }
+
+    void lsr(unsigned rd, unsigned rn, unsigned amount) {
+        emit(0xD340FC00U | (amount << 16U) | (rn << 5U) | rd);
+    }
+
+    void and_imm(unsigned rd, unsigned rn, unsigned immr, unsigned imms) {
+        emit(0x92400000U | (immr << 16U) | (imms << 10U) |
+             (rn << 5U) | rd);
+    }
+
+    void str_w(unsigned rt, unsigned rn, unsigned offset) {
+        emit(0xB9000000U | ((offset / 4U) << 10U) | (rn << 5U) | rt);
+    }
+
+    void ldr_w(unsigned rt, unsigned rn, unsigned offset) {
+        emit(0xB9400000U | ((offset / 4U) << 10U) | (rn << 5U) | rt);
+    }
+
+    void str_x(unsigned rt, unsigned rn, unsigned offset) {
+        emit(0xF9000000U | ((offset / 8U) << 10U) | (rn << 5U) | rt);
+    }
+
+    void ldr_x(unsigned rt, unsigned rn, unsigned offset) {
+        emit(0xF9400000U | ((offset / 8U) << 10U) | (rn << 5U) | rt);
+    }
+
+    void svc(unsigned immediate) { emit(0xD4000001U | (immediate << 5U)); }
+    void mrs_tpidrro(unsigned rd) { emit(0xD53BD060U | rd); }
+    void ret() { emit(0xD65F03C0U); }
+
+    void branch(const std::string& label) {
+        fixups_.push_back({words_.size(), label, 0x14000000U, 26U, 0U});
+        emit(0x14000000U);
+    }
+
+    void branch_link(const std::string& label) {
+        fixups_.push_back({words_.size(), label, 0x94000000U, 26U, 0U});
+        emit(0x94000000U);
+    }
+
+    void cbz(unsigned rt, const std::string& label) {
+        fixups_.push_back({words_.size(), label, 0xB4000000U | rt, 19U, 0U});
+        emit(0xB4000000U | rt);
+    }
+
+    void cbnz(unsigned rt, const std::string& label) {
+        fixups_.push_back({words_.size(), label, 0xB5000000U | rt, 19U, 0U});
+        emit(0xB5000000U | rt);
+    }
+
+    void bcond(unsigned condition, const std::string& label) {
+        fixups_.push_back({words_.size(), label, 0x54000000U | condition, 19U, condition});
+        emit(0x54000000U | condition);
+    }
+
+    [[nodiscard]] std::vector<std::uint32_t> finish() {
+        for (const Fixup& fixup : fixups_) {
+            const auto found = labels_.find(fixup.label);
+            if (found == labels_.end())
+                throw std::runtime_error("undefined assembly label: " + fixup.label);
+            const std::int64_t delta =
+                static_cast<std::int64_t>(found->second) -
+                static_cast<std::int64_t>(fixup.instruction_index);
+            if (fixup.immediate_bits == 26U) {
+                if (delta < -(1LL << 25U) || delta >= (1LL << 25U))
+                    throw std::runtime_error("AArch64 branch target is out of range");
+                words_[fixup.instruction_index] =
+                    fixup.base | (static_cast<std::uint32_t>(delta) & 0x03FFFFFFU);
+            } else {
+                if (delta < -(1LL << 18U) || delta >= (1LL << 18U))
+                    throw std::runtime_error("AArch64 conditional branch target is out of range");
+                words_[fixup.instruction_index] =
+                    (fixup.base & ~0x00FFFFE0U) |
+                    ((static_cast<std::uint32_t>(delta) & 0x7FFFFU) << 5U) |
+                    fixup.condition;
+            }
+        }
+        return words_;
+    }
+
+private:
+    struct Fixup {
+        std::size_t instruction_index{};
+        std::string label;
+        std::uint32_t base{};
+        unsigned immediate_bits{};
+        unsigned condition{};
+    };
+
+    std::vector<std::uint32_t> words_;
+    std::unordered_map<std::string, std::size_t> labels_;
+    std::vector<Fixup> fixups_;
 };
+
+void emit_cmif_request(A64Assembler& a, unsigned command_id,
+                       bool include_hid_service_name) {
+    a.movz(0U, 4U);
+    a.str_w(0U, 20U, 0U);
+    a.movz(0U, include_hid_service_name ? 6U : 4U);
+    a.str_w(0U, 20U, 4U);
+    a.movz(0U, 0U);
+    a.str_w(0U, 20U, 8U);
+    a.movz(0U, 0x4653U);
+    a.movk(0U, 0x4943U, 16U);
+    a.str_w(0U, 20U, 16U);
+    a.movz(0U, 0U);
+    a.str_w(0U, 20U, 20U);
+    a.movz(0U, static_cast<std::uint16_t>(command_id));
+    a.str_w(0U, 20U, 24U);
+    a.movz(0U, 0U);
+    a.str_w(0U, 20U, 28U);
+    if (include_hid_service_name) {
+        a.movz(0U, 0x6968U);
+        a.movk(0U, 0x0064U, 16U);
+        a.str_x(0U, 20U, 32U);
+    }
+}
+
+std::vector<std::uint32_t> build_self_test_program() {
+    A64Assembler a;
+
+    a.movz(1U, 0x0011U, 16U);
+    a.svc(0x1FU);
+    a.mov_reg(19U, 1U);
+    a.mrs_tpidrro(20U);
+
+    emit_cmif_request(a, 1U, true);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(21U, 20U, 12U);
+
+    emit_cmif_request(a, 0U, false);
+    a.mov_reg(0U, 21U);
+    a.svc(0x21U);
+    a.ldr_w(22U, 20U, 12U);
+
+    emit_cmif_request(a, 0U, false);
+    a.mov_reg(0U, 22U);
+    a.svc(0x21U);
+    a.ldr_w(23U, 20U, 12U);
+
+    a.mov_reg(0U, 23U);
+    a.movz(1U, 0x2000U, 16U);
+    a.movz(2U, 4U, 16U);
+    a.svc(0x14U);
+    a.mov_reg(24U, 1U);
+
+    a.movz(25U, 0x9A28U);
+    a.add_reg(25U, 24U, 25U);
+    a.movz(29U, 0x4000U, 16U);
+    a.movz(26U, 100U);
+    a.movz(27U, 100U);
+    a.mov64(17U, 0xFF202020U);
+    a.mov64(28U, 0xFFFF8040U);
+
+    a.bind("input_loop");
+    a.mov_reg(0U, 26U);
+    a.mov_reg(1U, 27U);
+    a.mov_reg(2U, 17U);
+    a.branch_link("draw_rect");
+
+    a.ldr_x(0U, 25U, 0U);
+    a.and_imm(1U, 0U, 52U, 0U);
+    a.cbz(1U, "no_left");
+    a.sub_imm(26U, 26U, 4U);
+    a.bind("no_left");
+
+    a.and_imm(1U, 0U, 51U, 0U);
+    a.cbz(1U, "no_up");
+    a.sub_imm(27U, 27U, 4U);
+    a.bind("no_up");
+
+    a.and_imm(1U, 0U, 50U, 0U);
+    a.cbz(1U, "no_right");
+    a.add_imm(26U, 26U, 4U);
+    a.bind("no_right");
+
+    a.and_imm(1U, 0U, 49U, 0U);
+    a.cbz(1U, "no_down");
+    a.add_imm(27U, 27U, 4U);
+    a.bind("no_down");
+
+    a.and_imm(26U, 26U, 0U, 9U);
+    a.and_imm(27U, 27U, 0U, 8U);
+
+    a.mov_reg(0U, 26U);
+    a.mov_reg(1U, 27U);
+    a.mov_reg(2U, 28U);
+    a.branch_link("draw_rect");
+    a.branch("input_loop");
+
+    a.bind("draw_rect");
+    a.mov_reg(8U, 0U);
+    a.mov_reg(9U, 1U);
+    a.mov_reg(10U, 2U);
+    a.lsl(3U, 9U, 10U);
+    a.lsl(4U, 9U, 8U);
+    a.add_reg(3U, 3U, 4U);
+    a.add_reg(3U, 3U, 8U);
+    a.lsl(3U, 3U, 2U);
+    a.add_reg(11U, 29U, 3U);
+    a.movz(12U, 32U);
+    a.bind("draw_row");
+    a.mov_reg(13U, 11U);
+    a.movz(14U, 32U);
+    a.bind("draw_column");
+    a.str_w(10U, 13U, 0U);
+    a.add_imm(13U, 13U, 4U);
+    a.subs_imm(14U, 14U, 1U);
+    a.bcond(1U, "draw_column");
+    a.add_imm(11U, 11U, 1U, true);
+    a.add_imm(11U, 11U, 896U);
+    a.subs_imm(12U, 12U, 1U);
+    a.bcond(1U, "draw_row");
+    a.ret();
+
+    return a.finish();
+}
 
 struct Options {
     std::optional<std::string> nro_path;
@@ -71,18 +319,17 @@ struct Options {
 
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [file.nro] [--headless]\n"
-              << "  No file: run the built-in SVC/framebuffer self-test.\n"
+              << "  No file: run the built-in SM/CMIF/HID controller demo.\n"
               << "  file.nro: load and run an uncompressed NRO image.\n"
-              << "  --headless: run without opening an SDL2 window (for CI/tests).\n";
+              << "  --headless: run without opening an SDL2 window.\n";
 }
 
 Options parse_options(int argc, char** argv) {
     Options options;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
-        if (argument == "--headless") {
-            options.headless = true;
-        } else if (argument == "--help" || argument == "-h") {
+        if (argument == "--headless") options.headless = true;
+        else if (argument == "--help" || argument == "-h") {
             print_usage(argv[0]);
             std::exit(0);
         } else if (!argument.empty() && argument[0] == '-') {
@@ -101,24 +348,25 @@ void initialize_machine_memory(horizon::AddressSpace& memory) {
                       horizon::Permission::Read | horizon::Permission::Write);
     memory.map_zeroed(kStackAddress, kStackSize,
                       horizon::Permission::Read | horizon::Permission::Write);
+    memory.map_zeroed(kTlsAddress, kTlsSize,
+                      horizon::Permission::Read | horizon::Permission::Write);
 }
 
 std::uint64_t load_self_test(horizon::AddressSpace& memory) {
+    const auto instructions = build_self_test_program();
     std::vector<std::uint8_t> text;
-    text.reserve(kSelfTestProgram.size() * sizeof(std::uint32_t));
-    for (const std::uint32_t instruction : kSelfTestProgram) {
-        for (unsigned byte = 0; byte < 4U; ++byte) {
-            text.push_back(static_cast<std::uint8_t>(
-                (instruction >> (byte * 8U)) & 0xFFU));
-        }
+    text.reserve(instructions.size() * sizeof(std::uint32_t));
+    for (const std::uint32_t instruction : instructions) {
+        for (unsigned byte = 0; byte < 4U; ++byte)
+            text.push_back(static_cast<std::uint8_t>(instruction >> (byte * 8U)));
     }
 
-    std::vector<std::uint8_t> message(kSelfTestMessage,
-                                      kSelfTestMessage + sizeof(kSelfTestMessage) - 1U);
+    const std::vector<std::uint8_t> port_name{'s', 'm', ':', 0U};
     memory.map(kSelfTestTextAddress, std::move(text),
                horizon::Permission::Read | horizon::Permission::Execute);
-    memory.map(kSelfTestMessageAddress, std::move(message),
-               horizon::Permission::Read);
+    memory.map(kSelfTestPortNameAddress, port_name, horizon::Permission::Read);
+    std::cout << "HorizonLite Stage 3 self-test: guest will connect sm:, request hid, "
+                 "map HID shared memory, and draw a keyboard-controlled box.\n";
     return kSelfTestTextAddress;
 }
 
@@ -133,36 +381,36 @@ std::uint64_t load_nro(const std::string& path,
 }
 
 void verify_self_test(const horizon::AddressSpace& memory) {
-    const std::uint32_t first_pixel = memory.read_u32(kFramebufferAddress);
-    const std::uint32_t final_pixel = memory.read_u32(
-        kFramebufferAddress + static_cast<std::uint64_t>(kFramebufferBytes - 4U));
-    if (first_pixel != 0xFF000000U || final_pixel == first_pixel) {
-        throw std::runtime_error("framebuffer self-test produced an unexpected pixel pattern");
+    const auto framebuffer = memory.view(kFramebufferAddress, kFramebufferBytes);
+    constexpr std::uint8_t color[4]{0x40U, 0x80U, 0xFFU, 0xFFU};
+    bool found_box_pixel = false;
+    for (std::size_t offset = 0; offset + 4U <= framebuffer.size(); offset += 4U) {
+        if (std::equal(std::begin(color), std::end(color),
+                       framebuffer.begin() + static_cast<std::ptrdiff_t>(offset))) {
+            found_box_pixel = true;
+            break;
+        }
     }
-
-    const auto framebuffer = memory.view(kFramebufferAddress,
-                                           kFramebufferBytes);
-    std::uint64_t checksum = 1469598103934665603ULL;
-    for (const std::uint8_t byte : framebuffer) {
-        checksum ^= byte;
-        checksum *= 1099511628211ULL;
-    }
-    std::cout << "Framebuffer self-test passed\n"
-              << "  First pixel: 0x" << std::hex << first_pixel << '\n'
-              << "  Last pixel:  0x" << final_pixel << '\n'
-              << "  FNV-1a64:    0x" << checksum << std::dec << '\n';
+    if (!found_box_pixel)
+        throw std::runtime_error("HID self-test did not render the guest-controlled box");
+    std::cout << "HID/CMIF framebuffer self-test passed: guest-generated box is present.\n";
 }
 
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                  const horizon::AddressSpace& memory, bool self_test) {
-    const std::size_t executed = cpu.run(kHeadlessInstructionLimit, kStopAddress);
+    if (self_test) {
+        kernel.update_hid_input(0U);
+        const std::size_t executed = cpu.run(kHeadlessInstructionLimit, kStopAddress);
+        std::cout << "Executed guest instructions: " << executed << '\n';
+        verify_self_test(memory);
+        return 0;
+    }
+
+    const std::size_t executed = cpu.run(20000000U, kStopAddress);
     std::cout << "Executed instructions: " << executed << '\n';
     if (kernel.running()) {
         std::cerr << "Execution reached the headless instruction limit.\n";
         return 3;
-    }
-    if (self_test) {
-        verify_self_test(memory);
     }
     return 0;
 }
@@ -171,21 +419,17 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                     const horizon::AddressSpace& memory) {
     horizon::SdlDisplay display;
     constexpr auto frame_duration = std::chrono::microseconds(16667);
-
     bool keep_open = true;
     while (keep_open) {
         const auto frame_start = std::chrono::steady_clock::now();
         keep_open = display.process_events();
-        if (!keep_open) {
-            break;
-        }
+        if (!keep_open) break;
 
-        if (kernel.running()) {
+        kernel.update_hid_input(display.read_controller_buttons());
+        if (kernel.running())
             (void)cpu.run(kInteractiveInstructionBudget, kStopAddress);
-        }
         display.render(memory, kFramebufferAddress,
                        kFramebufferWidth, kFramebufferHeight);
-
         std::this_thread::sleep_until(frame_start + frame_duration);
     }
     return 0;
@@ -209,10 +453,10 @@ int main(int argc, char** argv) {
         horizon::Arm64Cpu cpu(memory, svc_handler);
         cpu.state().pc = entry_point;
         cpu.state().sp = kStackAddress + kStackSize - 16U;
+        cpu.state().tpidrro_el0 = kTlsAddress;
 
-        if (options.headless) {
+        if (options.headless)
             return run_headless(cpu, kernel, memory, self_test);
-        }
         return run_interactive(cpu, kernel, memory);
     } catch (const std::exception& error) {
         std::cerr << "HorizonLite: " << error.what() << '\n';
