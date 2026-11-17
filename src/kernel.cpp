@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace horizon {
