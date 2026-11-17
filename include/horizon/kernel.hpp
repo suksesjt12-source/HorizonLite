@@ -9,6 +9,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <span>
@@ -29,7 +31,10 @@ enum class KernelObjectKind : std::uint8_t {
     AudioOut,
     BinderDriver,
     DisplayLayer,
-    Thread
+    Thread,
+    Profile,
+    FileSystem,
+    File
 };
 
 class KObject {
@@ -86,6 +91,32 @@ public:
     std::vector<Handle> waiting_handles;
     std::chrono::steady_clock::time_point wake_deadline{};
     bool has_deadline{};
+};
+
+struct Uid {
+    std::uint64_t low{};
+    std::uint64_t high{};
+    friend bool operator==(const Uid&, const Uid&) = default;
+};
+
+class KProfile final : public KObject {
+public:
+    KProfile();
+};
+
+class KFileSystem final : public KObject {
+public:
+    explicit KFileSystem(std::filesystem::path root_path);
+    std::filesystem::path root;
+};
+
+class KFile final : public KObject {
+public:
+    KFile(std::filesystem::path file_path, std::uint32_t open_mode);
+    ~KFile() override;
+    std::filesystem::path path;
+    std::uint32_t open_mode{};
+    std::fstream stream;
 };
 
 class KStorage final : public KObject {
@@ -307,7 +338,7 @@ private:
     std::vector<std::weak_ptr<KAudioOut>> audio_sessions_;
     std::unordered_map<std::int32_t, std::string> nv_devices_;
     std::unordered_map<std::uint32_t, NvMapBuffer> nvmap_buffers_;
-    std::shared_ptr<KDisplayLayer> display_layer_;
+    std::shared_ptr<KDisplayLayer> display_layer_;\n    std::filesystem::path save_data_root_{"save_data"};
     std::int32_t next_nv_fd_{3};
     std::uint32_t next_nvmap_handle_{1U};
     std::uint32_t next_nvmap_id_{1U};
