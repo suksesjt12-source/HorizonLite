@@ -1533,20 +1533,6 @@ std::size_t HorizonKernel::run_scheduler(
         if (executed == 0U && thread->status == ThreadStatus::Runnable)
             break;
     }
-    std::cerr << "[Scheduler] executed=" << executed_total
-              << " frames=" << (display_layer_ ? display_layer_->frame_number : 0U);
-    for (const auto& thread : threads_) {
-        std::cerr << " {handle=" << thread->handle
-                  << ",status=" << static_cast<unsigned>(thread->status)
-                  << ",pc=0x" << std::hex << thread->context.pc
-                  << ",x0=0x" << thread->context.x[0]
-                  << ",x1=0x" << thread->context.x[1]
-                  << ",x9=0x" << thread->context.x[9]
-                  << ",x13=0x" << thread->context.x[13]
-                  << ",x19=0x" << thread->context.x[19]
-                  << std::dec << '}';
-    }
-    std::cerr << '\\n';
     return executed_total;
 }
 
