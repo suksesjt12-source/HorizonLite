@@ -9,11 +9,11 @@
 namespace horizon {
 
 SdlDisplay::SdlDisplay() {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
         throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
     sdl_initialized_ = true;
 
-    window_ = SDL_CreateWindow("HorizonLite Stage 3 - IPC + HID",
+    window_ = SDL_CreateWindow("HorizonLite Stage 5 - IPC + HID + Audio",
                                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                1280, 720, SDL_WINDOW_SHOWN);
     if (window_ == nullptr) {
@@ -55,7 +55,7 @@ SdlDisplay::~SdlDisplay() {
     if (texture_ != nullptr) SDL_DestroyTexture(texture_);
     if (renderer_ != nullptr) SDL_DestroyRenderer(renderer_);
     if (window_ != nullptr) SDL_DestroyWindow(window_);
-    if (sdl_initialized_) SDL_Quit();
+    if (sdl_initialized_) SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
 }
 
 bool SdlDisplay::process_events() const {
