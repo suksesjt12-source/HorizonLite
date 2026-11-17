@@ -1,4 +1,4 @@
-# HorizonLite — Stage 7: cooperative threads, ARM64 atomics and scalar FPU
+# HorizonLite — Stage 8: Account, System Settings and persistent save data
 
 HorizonLite is an educational C++20 HLE research prototype for a bounded AArch64 instruction set, selected Horizon-style SVCs and HIPC/CMIF services, HID input, NRO ASET/RomFS access, SDL2 audio, and a host-rendered display pipeline.
 
@@ -95,6 +95,35 @@ Interactive mode:
 ```
 
 Keyboard mapping: Arrow keys/WASD for movement; Z=A, X=B, A=X, S=Y, Enter=Plus. Escape closes the host window.
+
+
+
+## Stage 8: Account, System Settings and persistent save data
+
+Stage 8 adds three user-facing service families to the existing HIPC/CMIF dispatcher:
+
+- `acc:u0`: one deterministic local profile (UID low `0x0000000000000001`, high `0x1122334455667788`, nickname `Player1`), user count/existence/list/last-opened queries, profile session creation, and `IProfile::Get/GetBase`.
+- `set:sys`: 0x100-byte firmware-version output (18.1.0 / NX / NintendoSDK Firmware for NX 18.1.0), BasicBlack color set, and device nickname.
+- `set`: language code `en-US` and USA region compatibility responses.
+- `fsp-srv` command 51 opens a per-user/per-program save-data sandbox under `./save_data/<uid-hex>/<program-id-hex>/`. The host directory is created on demand.
+- `IFileSystem`: CreateFile, DeleteFile, CreateDirectory, GetEntryType, OpenFile and Commit.
+- `IFile`: Read, Write, Flush, SetSize and GetSize backed by host `std::fstream` and `std::filesystem`.
+
+Guest paths are normalized and canonicalized before access. Absolute guest paths are treated as paths relative to the save root; parent traversal and symlink escapes are rejected. The implementation is a deliberately reduced HLE contract, not a drop-in implementation of every retail Horizon filesystem ABI detail.
+
+The built-in AArch64 guest now obtains its profile UID from `acc:u0`, fetches firmware data from `set:sys`, opens its save filesystem through `fsp-srv`, restores the two 32-bit sprite coordinates from `/pos.bin`, and writes the updated 8-byte state plus commits when HID X is pressed (keyboard A in the SDL mapping). The headless test injects that button to exercise the write path. Save files are relative to the emulator process working directory.
+
+The CTest suite includes a relaunch test that runs the headless guest again after the first run has created the persistent save file.
+
+Build and test remain:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+**Scope:** this stage provides one built-in profile and fixed compatibility settings. The filesystem command layer implements the specified subset and basic path sandboxing; it does not yet model all save-data metadata, journaling, multi-user account management, file timestamps, rights checks, or the full Horizon result-code space. The emulator is still a host-rendered HLE prototype and this desktop SDL2 workflow does not produce an Android APK.
 
 ## Retained Stage 6 display and GPU-memory HLE
 
