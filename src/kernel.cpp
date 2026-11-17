@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -358,7 +359,10 @@ HorizonKernel::HorizonKernel(AddressSpace& memory,
       hid_shared_memory_(std::make_shared<KSharedMemory>(kHidSharedMemorySize)),
       romfs_(std::make_shared<const std::vector<std::uint8_t>>(std::move(romfs))),
       audio_device_(audio),
-      display_layer_(std::make_shared<KDisplayLayer>()) {
+      display_layer_(std::make_shared<KDisplayLayer>()),
+      applet_event_(std::make_shared<KEvent>()) {
+    applet_event_->signaled = true;
+    applet_messages_.push(15U);
     auto sm_port = std::make_shared<KPort>("sm:");
     (void)handles_.insert(sm_port);
     const std::string sm_port_name = sm_port->name();
@@ -380,24 +384,59 @@ void HorizonKernel::svc_set_heap_size(CpuState& state) {
         state.x[1] = 0U;
         return;
     }
-    if (requested_size > heap_size_) {
-        if (heap_size_ != 0U) {
-            state.x[0] = kInvalidArgument;
-            state.x[1] = 0U;
-            return;
-        }
+    if (heap_capacity_ == 0U && requested_size != 0U) {
         try {
             memory_.map_zeroed(kHeapBase, static_cast<std::size_t>(requested_size),
                                Permission::Read | Permission::Write);
-            heap_size_ = requested_size;
+            heap_capacity_ = requested_size;
         } catch (const std::exception&) {
             state.x[0] = kInvalidArgument;
             state.x[1] = 0U;
             return;
         }
     }
+    if (requested_size > heap_capacity_) {
+        state.x[0] = kInvalidArgument;
+        state.x[1] = 0U;
+        return;
+    }
+    heap_size_ = requested_size;
     state.x[0] = kSuccess;
     state.x[1] = kHeapBase;
+}
+
+void HorizonKernel::prepare_loader_heap(std::uint64_t capacity) {
+    if (capacity == 0U || capacity > kMaximumHeapSize ||
+        capacity > std::numeric_limits<std::size_t>::max())
+        throw std::invalid_argument("LoaderConfig heap capacity is outside the supported range");
+    if (heap_capacity_ != 0U)
+        throw std::logic_error("loader heap has already been prepared");
+    memory_.map_zeroed(kHeapBase, static_cast<std::size_t>(capacity),
+                       Permission::Read | Permission::Write);
+    heap_capacity_ = capacity;
+}
+
+std::uint64_t HorizonKernel::loader_heap_base() const noexcept {
+    return kHeapBase;
+}
+
+std::uint64_t HorizonKernel::loader_heap_size() const noexcept {
+    return heap_capacity_;
+}
+
+void HorizonKernel::update_main_thread_context(const CpuState& state) {
+    if (!scheduler_initialized_ || !main_thread_)
+        throw std::logic_error("main thread must be initialized before setting its context");
+    main_thread_->context = state;
+    main_thread_->context.exclusive_monitor.clear();
+}
+
+void HorizonKernel::request_applet_exit() noexcept {
+    if (!applet_event_ || !applet_exit_requested_) {
+        applet_messages_.push(4U);
+        applet_exit_requested_ = true;
+    }
+    if (applet_event_) applet_event_->signaled = true;
 }
 
 void HorizonKernel::svc_exit_process(CpuState& state) noexcept {
