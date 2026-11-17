@@ -108,8 +108,11 @@ std::vector<std::uint8_t> make_native_window_parcel() {
     append_le32(parcel, 1U);
     append_le32(parcel, 1U);
     append_le32(parcel, 7U);
-    for (const char ch : std::string("dispdrv"))
+    for (const char ch : std::string("dispdrv")) {
         parcel.push_back(static_cast<std::uint8_t>(ch));
+        parcel.push_back(0U);
+    }
+    parcel.push_back(0U);
     parcel.push_back(0U);
     while ((parcel.size() & 3U) != 0U) parcel.push_back(0U);
     return parcel;
