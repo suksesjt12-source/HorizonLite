@@ -2,8 +2,10 @@
 #include "horizon/display.hpp"
 #include "horizon/kernel.hpp"
 #include "horizon/nro_loader.hpp"
+#include "horizon/romfs.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -32,18 +34,21 @@ constexpr std::size_t kStackSize = 1024U * 1024U;
 constexpr std::uint64_t kTlsAddress = 0x10000000ULL;
 constexpr std::size_t kTlsSize = 0x1000U;
 constexpr std::uint64_t kSelfTestTextAddress = 0x00100000ULL;
-constexpr std::uint64_t kSelfTestPortNameAddress = 0x00110000ULL;
+constexpr std::uint64_t kSelfTestStringsAddress = 0x00110000ULL;
 constexpr std::uint64_t kHidMappingAddress = 0x20000000ULL;
+constexpr std::uint64_t kSpriteBufferAddress = 0x21000000ULL;
 constexpr std::uint64_t kStopAddress = std::numeric_limits<std::uint64_t>::max();
 constexpr std::size_t kInteractiveInstructionBudget = 180000U;
 constexpr std::size_t kHeadlessInstructionLimit = 1000000U;
+constexpr std::uint32_t kHipcInvoke2Method = 4U;
 
 class A64Assembler {
 public:
     void emit(std::uint32_t instruction) { words_.push_back(instruction); }
 
     void bind(const std::string& label) {
-        if (labels_.contains(label)) throw std::runtime_error("duplicate assembly label: " + label);
+        if (labels_.contains(label))
+            throw std::runtime_error("duplicate assembly label: " + label);
         labels_.emplace(label, words_.size());
     }
 
@@ -145,7 +150,8 @@ public:
     }
 
     void bcond(unsigned condition, const std::string& label) {
-        fixups_.push_back({words_.size(), label, 0x54000000U | condition, 19U, condition});
+        fixups_.push_back({words_.size(), label, 0x54000000U | condition,
+                           19U, condition});
         emit(0x54000000U | condition);
     }
 
@@ -188,126 +194,259 @@ private:
     std::vector<Fixup> fixups_;
 };
 
+enum class IpcDescriptorKind {
+    None,
+    Pointer,
+    Send,
+    Receive
+};
+
 void emit_cmif_request(A64Assembler& a, unsigned command_id,
-                       bool include_hid_service_name) {
-    a.movz(0U, 4U);
-    a.str_w(0U, 20U, 0U);
-    a.movz(0U, include_hid_service_name ? 6U : 4U);
-    a.str_w(0U, 20U, 4U);
-    a.movz(0U, 0U);
-    a.str_w(0U, 20U, 8U);
-    a.movz(0U, 0x4653U);
-    a.movk(0U, 0x4943U, 16U);
-    a.str_w(0U, 20U, 16U);
-    a.movz(0U, 0U);
-    a.str_w(0U, 20U, 20U);
-    a.movz(0U, static_cast<std::uint16_t>(command_id));
-    a.str_w(0U, 20U, 24U);
-    a.movz(0U, 0U);
-    a.str_w(0U, 20U, 28U);
-    if (include_hid_service_name) {
-        a.movz(0U, 0x6968U);
-        a.movk(0U, 0x0064U, 16U);
-        a.str_x(0U, 20U, 32U);
+                       IpcDescriptorKind descriptor_kind,
+                       std::uint64_t descriptor_address,
+                       std::uint64_t descriptor_size,
+                       const std::vector<std::uint8_t>& payload = {}) {
+    std::uint32_t header0 = kHipcInvoke2Method;
+    std::size_t descriptor_bytes = 0U;
+    if (descriptor_kind == IpcDescriptorKind::Pointer) {
+        header0 |= 1U << 16U;
+        descriptor_bytes = 8U;
+    } else if (descriptor_kind == IpcDescriptorKind::Send) {
+        header0 |= 1U << 20U;
+        descriptor_bytes = 12U;
+    } else if (descriptor_kind == IpcDescriptorKind::Receive) {
+        header0 |= 1U << 24U;
+        descriptor_bytes = 12U;
     }
+
+    const std::size_t raw_words = (0x10U + payload.size() + 3U) / 4U;
+    if (raw_words > 0x3FFU)
+        throw std::runtime_error("guest self-test CMIF request exceeds HIPC raw limit");
+    const std::size_t cmif_offset =
+        (8U + descriptor_bytes + 0xFU) & ~static_cast<std::size_t>(0xFU);
+
+    a.mov64(0U, header0);
+    a.str_w(0U, 20U, 0U);
+    a.mov64(0U, static_cast<std::uint32_t>(raw_words));
+    a.str_w(0U, 20U, 4U);
+
+    if (descriptor_kind == IpcDescriptorKind::Pointer) {
+        const std::uint32_t tag =
+            (static_cast<std::uint32_t>(descriptor_size & 0xFFFFU) << 16U);
+        a.mov64(0U, tag);
+        a.str_w(0U, 20U, 8U);
+        a.mov64(0U, descriptor_address);
+        a.str_w(0U, 20U, 12U);
+    } else if (descriptor_kind == IpcDescriptorKind::Send ||
+               descriptor_kind == IpcDescriptorKind::Receive) {
+        a.mov64(0U, static_cast<std::uint32_t>(descriptor_size));
+        a.str_w(0U, 20U, 8U);
+        a.mov64(0U, static_cast<std::uint32_t>(descriptor_address));
+        a.str_w(0U, 20U, 12U);
+        a.movz(0U, 0U);
+        a.str_w(0U, 20U, 16U);
+    }
+
+    const auto store_word = [&a, cmif_offset](std::size_t byte_offset,
+                                               std::uint32_t value) {
+        a.mov64(0U, value);
+        a.str_w(0U, 20U, static_cast<unsigned>(cmif_offset + byte_offset));
+    };
+
+    store_word(0U, 0x49434653U);
+    store_word(4U, 0U);
+    store_word(8U, command_id);
+    store_word(12U, 0U);
+
+    for (std::size_t index = 0; index < payload.size(); index += 4U) {
+        std::uint32_t word = 0U;
+        for (unsigned byte = 0U; byte < 4U && index + byte < payload.size(); ++byte)
+            word |= static_cast<std::uint32_t>(payload[index + byte]) << (byte * 8U);
+        store_word(0x10U + index, word);
+    }
+}
+
+void emit_named_service_request(A64Assembler& a, std::uint64_t name_address) {
+    emit_cmif_request(a, 1U, IpcDescriptorKind::Send,
+                      name_address, 8U);
 }
 
 std::vector<std::uint32_t> build_self_test_program() {
     A64Assembler a;
 
-    a.movz(1U, 0x0011U, 16U);
+    a.mov64(1U, kSelfTestStringsAddress + 12U);
     a.svc(0x1FU);
     a.mov_reg(19U, 1U);
     a.mrs_tpidrro(20U);
 
-    emit_cmif_request(a, 1U, true);
+    emit_named_service_request(a, kSelfTestStringsAddress);
     a.mov_reg(0U, 19U);
     a.svc(0x21U);
     a.ldr_w(21U, 20U, 12U);
 
-    emit_cmif_request(a, 0U, false);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U);
     a.mov_reg(0U, 21U);
     a.svc(0x21U);
     a.ldr_w(22U, 20U, 12U);
 
-    emit_cmif_request(a, 0U, false);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U);
     a.mov_reg(0U, 22U);
     a.svc(0x21U);
     a.ldr_w(23U, 20U, 12U);
 
     a.mov_reg(0U, 23U);
-    a.movz(1U, 0x2000U, 16U);
-    a.movz(2U, 4U, 16U);
+    a.mov64(1U, kHidMappingAddress);
+    a.mov64(2U, 0x40000U);
     a.svc(0x14U);
     a.mov_reg(24U, 1U);
 
-    a.movz(25U, 0x9A28U);
-    a.add_reg(25U, 24U, 25U);
-    a.movz(29U, 0x4000U, 16U);
-    a.movz(26U, 100U);
-    a.movz(27U, 100U);
-    a.mov64(17U, 0xFF202020U);
-    a.mov64(28U, 0xFFFF8040U);
+    emit_named_service_request(a, kSelfTestStringsAddress + 4U);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(25U, 20U, 12U);
 
-    a.bind("input_loop");
+    std::vector<std::uint8_t> pid_payload(8U, 0U);
+    pid_payload[0] = 0x34U;
+    pid_payload[1] = 0x12U;
+    emit_cmif_request(a, 1U, IpcDescriptorKind::None, 0U, 0U, pid_payload);
+    a.mov_reg(0U, 25U);
+    a.svc(0x21U);
+
+    emit_cmif_request(a, 200U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 25U);
+    a.svc(0x21U);
+    a.ldr_w(26U, 20U, 12U);
+
+    emit_cmif_request(a, 4U, IpcDescriptorKind::None, 0U, 0U);
     a.mov_reg(0U, 26U);
-    a.mov_reg(1U, 27U);
-    a.mov_reg(2U, 17U);
-    a.branch_link("draw_rect");
+    a.svc(0x21U);
+    a.ldr_x(27U, 20U, 32U);
 
-    a.ldr_x(0U, 25U, 0U);
+    std::vector<std::uint8_t> read_payload(16U, 0U);
+    read_payload[0] = static_cast<std::uint8_t>(horizon::RomFsBuilder::kDemoSpriteDataOffset);
+    read_payload[1] = static_cast<std::uint8_t>(horizon::RomFsBuilder::kDemoSpriteDataOffset >> 8U);
+    read_payload[2] = static_cast<std::uint8_t>(horizon::RomFsBuilder::kDemoSpriteDataOffset >> 16U);
+    read_payload[3] = static_cast<std::uint8_t>(horizon::RomFsBuilder::kDemoSpriteDataOffset >> 24U);
+    constexpr std::uint64_t sprite_bytes = 16U * 16U * 4U;
+    read_payload[8] = static_cast<std::uint8_t>(sprite_bytes);
+    read_payload[9] = static_cast<std::uint8_t>(sprite_bytes >> 8U);
+    read_payload[10] = static_cast<std::uint8_t>(sprite_bytes >> 16U);
+    read_payload[11] = static_cast<std::uint8_t>(sprite_bytes >> 24U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Receive,
+                      kSpriteBufferAddress, sprite_bytes, read_payload);
+    a.mov_reg(0U, 26U);
+    a.svc(0x21U);
+
+    a.mov64(15U, kHidMappingAddress + 0x9A28U);
+    a.mov64(16U, kSpriteBufferAddress);
+    a.mov64(29U, kFramebufferAddress);
+    a.movz(19U, 100U);
+    a.movz(18U, 100U);
+    a.mov64(17U, 0xFF101820U);
+    a.movz(28U, 0U);
+
+    a.bind("frame_loop");
+    a.mov_reg(0U, 19U);
+    a.mov_reg(1U, 18U);
+    a.mov_reg(2U, 17U);
+    a.branch_link("draw_solid_sprite_area");
+
+    a.ldr_x(0U, 15U, 0U);
     a.and_imm(1U, 0U, 52U, 0U);
-    a.cbz(1U, "no_left");
-    a.sub_imm(26U, 26U, 4U);
-    a.bind("no_left");
+    a.cbz(1U, "not_left");
+    a.sub_imm(19U, 19U, 2U);
+    a.bind("not_left");
 
     a.and_imm(1U, 0U, 51U, 0U);
-    a.cbz(1U, "no_up");
-    a.sub_imm(27U, 27U, 4U);
-    a.bind("no_up");
+    a.cbz(1U, "not_up");
+    a.sub_imm(18U, 18U, 2U);
+    a.bind("not_up");
 
     a.and_imm(1U, 0U, 50U, 0U);
-    a.cbz(1U, "no_right");
-    a.add_imm(26U, 26U, 4U);
-    a.bind("no_right");
+    a.cbz(1U, "not_right");
+    a.add_imm(19U, 19U, 2U);
+    a.bind("not_right");
 
     a.and_imm(1U, 0U, 49U, 0U);
-    a.cbz(1U, "no_down");
-    a.add_imm(27U, 27U, 4U);
-    a.bind("no_down");
+    a.cbz(1U, "not_down");
+    a.add_imm(18U, 18U, 2U);
+    a.bind("not_down");
 
-    a.and_imm(26U, 26U, 0U, 9U);
-    a.and_imm(27U, 27U, 0U, 8U);
+    a.and_imm(19U, 19U, 0U, 10U);
+    a.subs_imm(1U, 19U, 1264U);
+    a.bcond(2U, "wrap_x");
+    a.branch("x_ready");
+    a.bind("wrap_x");
+    a.movz(19U, 0U);
+    a.bind("x_ready");
 
-    a.mov_reg(0U, 26U);
-    a.mov_reg(1U, 27U);
-    a.mov_reg(2U, 28U);
-    a.branch_link("draw_rect");
-    a.branch("input_loop");
+    a.and_imm(18U, 18U, 0U, 9U);
+    a.subs_imm(1U, 18U, 704U);
+    a.bcond(2U, "wrap_y");
+    a.branch("y_ready");
+    a.bind("wrap_y");
+    a.movz(18U, 0U);
+    a.bind("y_ready");
 
-    a.bind("draw_rect");
+    a.mov_reg(0U, 19U);
+    a.mov_reg(1U, 18U);
+    a.branch_link("draw_rgba_sprite");
+    a.branch("frame_loop");
+
+    a.bind("draw_solid_sprite_area");
     a.mov_reg(8U, 0U);
     a.mov_reg(9U, 1U);
     a.mov_reg(10U, 2U);
-    a.lsl(3U, 9U, 10U);
-    a.lsl(4U, 9U, 8U);
+    a.lsl(3U, 9U, 12U);
+    a.lsl(4U, 9U, 10U);
     a.add_reg(3U, 3U, 4U);
-    a.add_reg(3U, 3U, 8U);
-    a.lsl(3U, 3U, 2U);
-    a.add_reg(11U, 29U, 3U);
-    a.movz(12U, 32U);
-    a.bind("draw_row");
-    a.mov_reg(13U, 11U);
-    a.movz(14U, 32U);
-    a.bind("draw_column");
-    a.str_w(10U, 13U, 0U);
-    a.add_imm(13U, 13U, 4U);
-    a.subs_imm(14U, 14U, 1U);
-    a.bcond(1U, "draw_column");
-    a.add_imm(11U, 11U, 4096U, true);
-    a.add_imm(11U, 11U, 896U);
+    a.lsl(4U, 8U, 2U);
+    a.add_reg(3U, 3U, 4U);
+    a.add_reg(6U, 29U, 3U);
+    a.movz(12U, 16U);
+    a.bind("solid_row");
+    a.mov_reg(11U, 6U);
+    a.movz(13U, 16U);
+    a.bind("solid_column");
+    a.str_w(10U, 11U, 0U);
+    a.add_imm(11U, 11U, 4U);
+    a.subs_imm(13U, 13U, 1U);
+    a.bcond(1U, "solid_column");
+    a.add_imm(6U, 6U, 4096U, true);
+    a.add_imm(6U, 6U, 1024U);
     a.subs_imm(12U, 12U, 1U);
-    a.bcond(1U, "draw_row");
+    a.bcond(1U, "solid_row");
+    a.ret();
+
+    a.bind("draw_rgba_sprite");
+    a.mov_reg(8U, 0U);
+    a.mov_reg(9U, 1U);
+    a.lsl(3U, 9U, 12U);
+    a.lsl(4U, 9U, 10U);
+    a.add_reg(3U, 3U, 4U);
+    a.lsl(4U, 8U, 2U);
+    a.add_reg(3U, 3U, 4U);
+    a.add_reg(6U, 29U, 3U);
+    a.mov_reg(7U, 16U);
+    a.movz(12U, 16U);
+    a.bind("sprite_row");
+    a.mov_reg(11U, 6U);
+    a.mov_reg(13U, 7U);
+    a.movz(14U, 16U);
+    a.bind("sprite_column");
+    a.ldr_w(10U, 13U, 0U);
+    a.cbz(10U, "transparent_pixel");
+    a.str_w(10U, 11U, 0U);
+    a.bind("transparent_pixel");
+    a.add_imm(13U, 13U, 4U);
+    a.add_imm(11U, 11U, 4U);
+    a.subs_imm(14U, 14U, 1U);
+    a.bcond(1U, "sprite_column");
+    a.add_imm(6U, 6U, 4096U, true);
+    a.add_imm(6U, 6U, 1024U);
+    a.add_imm(7U, 7U, 64U);
+    a.subs_imm(12U, 12U, 1U);
+    a.bcond(1U, "sprite_row");
     a.ret();
 
     return a.finish();
@@ -320,8 +459,8 @@ struct Options {
 
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [file.nro] [--headless]\n"
-              << "  No file: run the built-in SM/CMIF/HID controller demo.\n"
-              << "  file.nro: load and run an uncompressed NRO image.\n"
+              << "  No file: run the built-in SM/HID/fsp-srv RomFS sprite demo.\n"
+              << "  file.nro: load an uncompressed NRO and its optional ASET RomFS.\n"
               << "  --headless: run without opening an SDL2 window.\n";
 }
 
@@ -351,6 +490,17 @@ void initialize_machine_memory(horizon::AddressSpace& memory) {
                       horizon::Permission::Read | horizon::Permission::Write);
     memory.map_zeroed(kTlsAddress, kTlsSize,
                       horizon::Permission::Read | horizon::Permission::Write);
+    memory.map_zeroed(kSpriteBufferAddress, 0x1000U,
+                      horizon::Permission::Read | horizon::Permission::Write);
+
+    std::vector<std::uint8_t> background(kFramebufferBytes, 0U);
+    for (std::size_t offset = 0U; offset < background.size(); offset += 4U) {
+        background[offset] = 0x10U;
+        background[offset + 1U] = 0x18U;
+        background[offset + 2U] = 0x20U;
+        background[offset + 3U] = 0xFFU;
+    }
+    memory.write(kFramebufferAddress, background);
 }
 
 std::uint64_t load_self_test(horizon::AddressSpace& memory) {
@@ -358,50 +508,74 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
     std::vector<std::uint8_t> text;
     text.reserve(instructions.size() * sizeof(std::uint32_t));
     for (const std::uint32_t instruction : instructions) {
-        for (unsigned byte = 0; byte < 4U; ++byte)
+        for (unsigned byte = 0U; byte < 4U; ++byte)
             text.push_back(static_cast<std::uint8_t>(instruction >> (byte * 8U)));
     }
 
-    const std::vector<std::uint8_t> port_name{'s', 'm', ':', 0U};
+    const std::vector<std::uint8_t> service_strings{
+        'h', 'i', 'd', 0U,
+        'f', 's', 'p', '-', 's', 'r', 'v', 0U,
+        's', 'm', ':', 0U
+    };
     memory.map(kSelfTestTextAddress, std::move(text),
                horizon::Permission::Read | horizon::Permission::Execute);
-    memory.map(kSelfTestPortNameAddress, port_name, horizon::Permission::Read);
-    std::cout << "HorizonLite Stage 3 self-test: guest will connect sm:, request hid, "
-                 "map HID shared memory, and draw a keyboard-controlled box.\n";
+    memory.map(kSelfTestStringsAddress, service_strings,
+               horizon::Permission::Read);
+    std::cout << "HorizonLite Stage 4 self-test: guest connects to sm:, requests hid and fsp-srv, "
+                 "reads sprite.rgba through IStorage::Read, then draws the sprite from guest RAM.\n";
     return kSelfTestTextAddress;
 }
 
-std::uint64_t load_nro(const std::string& path,
-                       horizon::AddressSpace& memory) {
-    const auto file = horizon::NroLoader::read_file(path);
+std::vector<std::uint8_t> make_self_test_romfs() {
+    const std::vector<std::uint8_t> sprite =
+        horizon::RomFsBuilder::make_demo_sprite_rgba();
+    return horizon::RomFsBuilder::build_single_file("sprite.rgba", sprite);
+}
+
+struct LoadedProgram {
+    std::uint64_t entry_point{};
+    std::vector<std::uint8_t> romfs;
+    bool self_test{};
+};
+
+LoadedProgram load_program(const Options& options,
+                           horizon::AddressSpace& memory) {
+    if (!options.nro_path.has_value()) {
+        LoadedProgram result;
+        result.entry_point = load_self_test(memory);
+        result.romfs = make_self_test_romfs();
+        result.self_test = true;
+        return result;
+    }
+
+    const auto file = horizon::NroLoader::read_file(*options.nro_path);
     const horizon::NroImage image = horizon::NroLoader::load(file, memory);
-    std::cout << "Loaded NRO0 image: " << path << '\n'
+    std::cout << "Loaded NRO0 image: " << *options.nro_path << '\n'
               << "  Declared size: 0x" << std::hex << image.declared_size << '\n'
-              << "  Entry point:   0x" << image.entry_point << std::dec << '\n';
-    return image.entry_point;
+              << "  Entry point:   0x" << image.entry_point << std::dec << '\n'
+              << "  ASET RomFS:    " << image.romfs.size() << " bytes\n";
+    return LoadedProgram{image.entry_point, image.romfs, false};
 }
 
 void verify_self_test(const horizon::AddressSpace& memory) {
-    const auto framebuffer = memory.view(kFramebufferAddress, kFramebufferBytes);
-    constexpr std::uint8_t color[4]{0x40U, 0x80U, 0xFFU, 0xFFU};
-    bool found_box_pixel = false;
-    for (std::size_t offset = 0; offset + 4U <= framebuffer.size(); offset += 4U) {
-        if (std::equal(std::begin(color), std::end(color),
-                       framebuffer.begin() + static_cast<std::ptrdiff_t>(offset))) {
-            found_box_pixel = true;
-            break;
-        }
+    const std::uint64_t pixel_address =
+        kFramebufferAddress +
+        (static_cast<std::uint64_t>(101U) * kFramebufferWidth + 101U) * 4U;
+    constexpr std::uint32_t expected_rgba = 0xFFF0B842U;
+    const std::uint32_t actual = memory.read_u32(pixel_address);
+    if (actual != expected_rgba) {
+        throw std::runtime_error("RomFS sprite self-test failed: guest did not draw expected RGBA pixel");
     }
-    if (!found_box_pixel)
-        throw std::runtime_error("HID self-test did not render the guest-controlled box");
-    std::cout << "HID/CMIF framebuffer self-test passed: guest-generated box is present.\n";
+    std::cout << "RomFS/fsp-srv/HIPC sprite self-test passed\n"
+              << "  RomFS sprite pixel: 0x" << std::hex << actual << std::dec << '\n';
 }
 
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                  const horizon::AddressSpace& memory, bool self_test) {
     if (self_test) {
         kernel.update_hid_input(0U);
-        const std::size_t executed = cpu.run(kHeadlessInstructionLimit, kStopAddress);
+        const std::size_t executed =
+            cpu.run(kHeadlessInstructionLimit, kStopAddress);
         std::cout << "Executed guest instructions: " << executed << '\n';
         verify_self_test(memory);
         return 0;
@@ -443,21 +617,17 @@ int main(int argc, char** argv) {
         const Options options = parse_options(argc, argv);
         horizon::AddressSpace memory;
         initialize_machine_memory(memory);
+        LoadedProgram program = load_program(options, memory);
 
-        const bool self_test = !options.nro_path.has_value();
-        const std::uint64_t entry_point = self_test
-            ? load_self_test(memory)
-            : load_nro(*options.nro_path, memory);
-
-        horizon::HorizonKernel kernel(memory);
+        horizon::HorizonKernel kernel(memory, std::move(program.romfs));
         horizon::SvcHandler svc_handler(kernel);
         horizon::Arm64Cpu cpu(memory, svc_handler);
-        cpu.state().pc = entry_point;
+        cpu.state().pc = program.entry_point;
         cpu.state().sp = kStackAddress + kStackSize - 16U;
         cpu.state().tpidrro_el0 = kTlsAddress;
 
         if (options.headless)
-            return run_headless(cpu, kernel, memory, self_test);
+            return run_headless(cpu, kernel, memory, program.self_test);
         return run_interactive(cpu, kernel, memory);
     } catch (const std::exception& error) {
         std::cerr << "HorizonLite: " << error.what() << '\n';
