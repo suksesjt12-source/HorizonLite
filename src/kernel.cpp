@@ -11,6 +11,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -934,7 +935,8 @@ CmifResponse HorizonKernel::dispatch_cmif(
             }
             if (service_name != "hid" && service_name != "fsp-srv" &&
                 service_name != "audout:u" && service_name != "nvdrv" &&
-                service_name != "vi:m") {
+                service_name != "vi:m" && service_name != "acc:u0" &&
+                service_name != "set:sys" && service_name != "set") {
                 response.result = kInvalidArgument;
                 return response;
             }
@@ -975,6 +977,15 @@ CmifResponse HorizonKernel::dispatch_cmif(
         return dispatch_audio_manager(request);
     }
 
+    if (session.service_name() == "acc:u0")
+        return dispatch_account(request);
+
+    if (session.service_name() == "set:sys")
+        return dispatch_system_settings(request);
+
+    if (session.service_name() == "set")
+        return dispatch_settings(request);
+
     if (session.service_name() == "nvdrv")
         return dispatch_nvdrv(request);
 
@@ -1002,6 +1013,40 @@ CmifResponse HorizonKernel::dispatch_cmif(
         if (request.command_id == 1U) {
             if (request.data.size() < 8U)
                 response.result = kInvalidArgument;
+            return response;
+        }
+        if (request.command_id == 51U) {
+            if (request.data.size() < 0x40U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::size_t attribute_offset =
+                request.data.size() >= 0x48U ? 8U : 0U;
+            if (request.data.size() < attribute_offset + 24U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::uint64_t program_id =
+                read_le64(request.data, attribute_offset);
+            const std::uint64_t uid_low =
+                read_le64(request.data, attribute_offset + 8U);
+            const std::uint64_t uid_high =
+                read_le64(request.data, attribute_offset + 16U);
+            const auto to_hex = [](std::uint64_t value) {
+                std::ostringstream stream;
+                stream << std::hex << std::setfill('0') << std::setw(16) << value;
+                return stream.str();
+            };
+            try {
+                const std::filesystem::path root = save_data_root_ /
+                    (to_hex(uid_high) + to_hex(uid_low)) /
+                    to_hex(program_id);
+                auto file_system = std::make_shared<KFileSystem>(root);
+                response.handle = handles_.insert(file_system);
+                response.move_handle = true;
+            } catch (const std::exception&) {
+                response.result = kInvalidArgument;
+            }
             return response;
         }
         if (request.command_id == 200U) {
@@ -1041,6 +1086,14 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
         } else if (object->kind() == KernelObjectKind::BinderDriver) {
             response = dispatch_hos_binder(
                 std::static_pointer_cast<KHOSBinderDriver>(object), request);
+        } else if (object->kind() == KernelObjectKind::Profile) {
+            response = dispatch_profile(request);
+        } else if (object->kind() == KernelObjectKind::FileSystem) {
+            response = dispatch_file_system(
+                std::static_pointer_cast<KFileSystem>(object), request);
+        } else if (object->kind() == KernelObjectKind::File) {
+            response = dispatch_file(
+                std::static_pointer_cast<KFile>(object), request);
         } else {
             state.x[0] = kInvalidHandle;
             return;
