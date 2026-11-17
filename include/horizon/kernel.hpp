@@ -108,6 +108,7 @@ class KFileSystem final : public KObject {
 public:
     explicit KFileSystem(std::filesystem::path root_path);
     std::filesystem::path root;
+    std::vector<std::weak_ptr<KFile>> open_files;
 };
 
 class KFile final : public KObject {
