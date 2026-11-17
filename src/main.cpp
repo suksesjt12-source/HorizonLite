@@ -847,6 +847,7 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
         'n', 'v', 'd', 'r', 'v', 0U, 0U, 0U,
         'v', 'i', ':', 'm', 0U, 0U, 0U, 0U,
         '/', 'd', 'e', 'v', '/', 'n', 'v', 'm', 'a', 'p', 0U,
+        0U, 0U, 0U, 0U, 0U,
         'D', 'e', 'f', 'a', 'u', 'l', 't', 0U
     };
     memory.map(kSelfTestTextAddress, std::move(text),
