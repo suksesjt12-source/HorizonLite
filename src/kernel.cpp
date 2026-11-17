@@ -504,13 +504,20 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
             state.x[0] = kInvalidHandle;
             return;
         }
+        if (response.result != kSuccess) {
+            std::cerr << "[HorizonKernel] IPC command " << request.command_id
+                      << " returned 0x" << std::hex << response.result
+                      << std::dec << '\\n';
+        }
         const std::vector<std::uint8_t> reply =
             CmifCodec::build_response(response, 0x100U);
         if (reply.size() > 0x100U)
             throw std::runtime_error("IPC reply does not fit the TLS command buffer");
         memory_.write(state.tpidrro_el0, reply);
         state.x[0] = kSuccess;
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+        std::cerr << "[HorizonKernel] svcSendSyncRequest failed: "
+                  << error.what() << '\\n';
         state.x[0] = kInvalidArgument;
     }
 }
