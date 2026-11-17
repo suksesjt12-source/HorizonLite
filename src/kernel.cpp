@@ -1152,6 +1152,7 @@ CmifResponse HorizonKernel::dispatch_time_service(
             zone_name[1] = 'T';
             zone_name[2] = 'C';
             calendar.insert(calendar.end(), zone_name.begin(), zone_name.end());
+            append_le32(calendar, 0U);
 
             const IpcBufferDescriptor* output = find_receive_buffer(request);
             if (output == nullptr && !request.pointer_buffers.empty())
