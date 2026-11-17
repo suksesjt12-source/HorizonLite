@@ -31,6 +31,7 @@ public:
              Permission permissions);
     void map_zeroed(std::uint64_t base, std::size_t size,
                     Permission permissions);
+    void unmap(std::uint64_t base, std::size_t size);
 
     [[nodiscard]] std::vector<std::uint8_t> read(
         std::uint64_t address, std::size_t size,
