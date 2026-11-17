@@ -41,7 +41,8 @@ enum class KernelObjectKind : std::uint8_t {
     Thread,
     Profile,
     FileSystem,
-    File
+    File,
+    GenericStubService
 };
 
 class KObject {
@@ -64,6 +65,14 @@ private:
 class KClientSession final : public KObject {
 public:
     explicit KClientSession(std::string service_name);
+    [[nodiscard]] const std::string& service_name() const noexcept;
+private:
+    std::string service_name_;
+};
+
+class GenericStubService final : public KObject {
+public:
+    explicit GenericStubService(std::string service_name);
     [[nodiscard]] const std::string& service_name() const noexcept;
 private:
     std::string service_name_;
@@ -319,6 +328,8 @@ private:
         const std::string& service_name, const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_time_service(
         const std::string& service_name, const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_generic_stub(
+        const GenericStubService& service, const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_file_system(
         const std::shared_ptr<KFileSystem>& file_system,
         const CmifRequest& request);
