@@ -1134,7 +1134,7 @@ CmifResponse HorizonKernel::dispatch_time_service(
                 return response;
             }
             std::vector<std::uint8_t> calendar;
-            calendar.reserve(0x38U);
+            calendar.reserve(0x20U);
             const auto year = static_cast<std::uint16_t>(converted->tm_year + 1900);
             calendar.push_back(static_cast<std::uint8_t>(year & 0xFFU));
             calendar.push_back(static_cast<std::uint8_t>(year >> 8U));
@@ -1147,11 +1147,12 @@ CmifResponse HorizonKernel::dispatch_time_service(
             append_le32(calendar, static_cast<std::uint32_t>(converted->tm_wday));
             append_le32(calendar, static_cast<std::uint32_t>(converted->tm_yday));
             append_le32(calendar, 0U);
-            std::array<std::uint8_t, 0x24U> zone_name{};
+            std::array<std::uint8_t, 8U> zone_name{};
             zone_name[0] = 'U';
             zone_name[1] = 'T';
             zone_name[2] = 'C';
             calendar.insert(calendar.end(), zone_name.begin(), zone_name.end());
+            append_le32(calendar, converted->tm_isdst > 0 ? 1U : 0U);
             append_le32(calendar, 0U);
 
             const IpcBufferDescriptor* output = find_receive_buffer(request);
