@@ -84,7 +84,7 @@ SdlDisplay::SdlDisplay() {
         throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
     sdl_initialized_ = true;
 
-    window_ = SDL_CreateWindow("HorizonLite Stage 5 - IPC + HID + Audio",
+    window_ = SDL_CreateWindow("HorizonLite Stage 6 - vi:m + nvdrv",
                                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                1280, 720, SDL_WINDOW_SHOWN);
     if (window_ == nullptr) {
