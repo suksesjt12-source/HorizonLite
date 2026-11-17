@@ -582,35 +582,6 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         const std::size_t executed =
             cpu.run(kHeadlessInstructionLimit, kStopAddress);
         std::cout << "Executed guest instructions: " << executed << '\n';
-        const auto& state = cpu.state();
-        std::cerr << "  Guest PC=0x" << std::hex << state.pc
-                  << " X18(Y)=0x" << state.x[18]
-                  << " X19(X)=0x" << state.x[19]
-                  << " X6=0x" << state.x[6]
-                  << " X7=0x" << state.x[7]
-                  << " X0=0x" << state.x[0]
-                  << " X1=0x" << state.x[1]
-                  << " X3=0x" << state.x[3]
-                  << " X4=0x" << state.x[4]
-                  << " X8=0x" << state.x[8]
-                  << " X9=0x" << state.x[9]
-                  << " X10=0x" << state.x[10]
-                  << " HID=0x" << memory.read_u64(kHidMappingAddress + 0x9A28U)
-                  << std::dec << '\\n';
-        const auto pixels = memory.view(kFramebufferAddress, kFramebufferBytes);
-        constexpr std::array<std::uint8_t, 4> needle{0x42U, 0xB8U, 0xF0U, 0xFFU};
-        bool found = false;
-        for (std::size_t offset = 0; offset + needle.size() <= pixels.size(); offset += 4U) {
-            if (std::equal(needle.begin(), needle.end(),
-                           pixels.begin() + static_cast<std::ptrdiff_t>(offset))) {
-                std::cerr << "  Found expected sprite pixel at x="
-                          << ((offset / 4U) % kFramebufferWidth)
-                          << " y=" << ((offset / 4U) / kFramebufferWidth) << '\\n';
-                found = true;
-                break;
-            }
-        }
-        std::cerr << "  Sprite pixel scan: " << (found ? "found" : "not found") << '\\n';
         verify_self_test(memory);
         return 0;
     }
