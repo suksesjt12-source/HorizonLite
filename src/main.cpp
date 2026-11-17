@@ -368,9 +368,9 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.ldr_w(11U, 20U, 32U);
     a.str_w(11U, 2U, 0x8CU);
 
-    a.mov64(0U, 0U);
-    a.str_w(0U, 2U, 0x200U);
     a.mov64(0U, 0x00800000U);
+    a.str_w(0U, 2U, 0x200U);
+    a.mov64(0U, 0U);
     a.str_w(0U, 2U, 0x204U);
     const std::vector<std::uint8_t> create_ioctl{
         0U, 0U, 0U, 0U, 0x01U, 0x01U, 0x08U, 0xC0U
@@ -381,7 +381,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.str_w(0U, 20U, 0x30U);
     a.ldr_w(0U, 2U, 0x88U);
     a.svc(0x21U);
-    a.ldr_w(10U, 2U, 0x200U);
+    a.ldr_w(10U, 2U, 0x204U);
     a.str_w(10U, 2U, 0x90U);
 
     a.ldr_w(0U, 2U, 0x90U);
