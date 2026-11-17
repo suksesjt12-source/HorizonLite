@@ -72,6 +72,18 @@ int main() {
         return 1;
     }
 
-    std::cout << "CPU MOVN/EOR and byte/halfword/word/doubleword memory test passed\n";
+    std::vector<std::uint8_t> pcm(4800U * 4U, 0U);
+    audio.pause(true);
+    audio.queue_pcm(pcm);
+    const bool queued = audio.queued_bytes() == pcm.size();
+    audio.clear();
+    const bool cleared = audio.queued_bytes() == 0U;
+    if (!queued || !cleared) {
+        std::cerr << "SDL2 audio queue test failed; queued="
+                  << queued << " cleared=" << cleared << '\\n';
+        return 1;
+    }
+
+    std::cout << "CPU MOVN/EOR/STRH and SDL2 queued-audio test passed\n";
     return 0;
 }
