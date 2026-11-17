@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -35,6 +37,7 @@ constexpr std::uint64_t kTlsAddress = 0x10000000ULL;
 constexpr std::size_t kTlsSize = 0x1000U;
 constexpr std::uint64_t kSelfTestTextAddress = 0x00100000ULL;
 constexpr std::uint64_t kSelfTestStringsAddress = 0x00110000ULL;
+constexpr std::uint64_t kStage8StringsAddress = 0x00112000ULL;
 constexpr std::uint64_t kHidMappingAddress = 0x20000000ULL;
 constexpr std::uint64_t kSpriteBufferAddress = 0x21000000ULL;
 constexpr std::uint64_t kPcmBufferAddress = 0x22000000ULL;
@@ -415,6 +418,68 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.mov_reg(19U, 1U);
     a.mrs_tpidrro(20U);
 
+    emit_named_service_request(a, kStage8StringsAddress);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(14U, 20U, 12U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(14U, 2U, 0xB4U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 14U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 32U);
+    a.str_w(10U, 2U, 0xB0U);
+    emit_cmif_request(a, 4U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 14U);
+    a.svc(0x21U);
+    a.ldr_x(10U, 20U, 32U);
+    a.ldr_x(11U, 20U, 40U);
+    a.str_x(10U, 2U, 0xC0U);
+    a.str_x(11U, 2U, 0xC8U);
+
+    std::vector<std::uint8_t> user_uid_payload(16U, 0U);
+    for (unsigned byte = 0U; byte < 8U; ++byte) {
+        user_uid_payload[byte] = static_cast<std::uint8_t>(0x0000000000000001ULL >> (byte * 8U));
+        user_uid_payload[8U + byte] = static_cast<std::uint8_t>(0x1122334455667788ULL >> (byte * 8U));
+    }
+    emit_cmif_request(a, 1U, IpcDescriptorKind::None, 0U, 0U, user_uid_payload);
+    a.mov_reg(0U, 14U);
+    a.svc(0x21U);
+    emit_cmif_request(a, 5U, IpcDescriptorKind::None, 0U, 0U, user_uid_payload);
+    a.mov_reg(0U, 14U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0xCCU);
+    emit_cmif_request(a, 1U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0xCCU);
+    a.svc(0x21U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Receive,
+                      kStage6ScratchAddress + 0x600U, 0x80U);
+    a.ldr_w(0U, 2U, 0xCCU);
+    a.svc(0x21U);
+
+    emit_named_service_request(a, kStage8StringsAddress + 7U);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(13U, 20U, 12U);
+    a.str_w(13U, 2U, 0xD8U);
+    emit_cmif_request(a, 3U, IpcDescriptorKind::Receive,
+                      kStage6ScratchAddress + 0x500U, 0x100U);
+    a.ldr_w(0U, 2U, 0xD8U);
+    a.svc(0x21U);
+    emit_named_service_request(a, kStage8StringsAddress + 15U);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(12U, 20U, 12U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 12U);
+    a.svc(0x21U);
+    a.ldr_x(10U, 20U, 32U);
+    a.str_x(10U, 2U, 0xE0U);
+    emit_cmif_request(a, 4U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 12U);
+    a.svc(0x21U);
+
     a.movz(0U, 0U);
     a.mov64(1U, 0x00C00000U);
     a.svc(0x01U);
@@ -654,6 +719,72 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.mov_reg(0U, 26U);
     a.svc(0x21U);
 
+    std::vector<std::uint8_t> save_attribute(0x48U, 0U);
+    const std::uint64_t save_program_id = 0x0100000000000000ULL;
+    for (unsigned byte = 0U; byte < 8U; ++byte) {
+        save_attribute[8U + byte] =
+            static_cast<std::uint8_t>(save_program_id >> (byte * 8U));
+        save_attribute[16U + byte] =
+            static_cast<std::uint8_t>(0x0000000000000001ULL >> (byte * 8U));
+        save_attribute[24U + byte] =
+            static_cast<std::uint8_t>(0x1122334455667788ULL >> (byte * 8U));
+    }
+    emit_cmif_request(a, 51U, IpcDescriptorKind::None, 0U, 0U,
+                      save_attribute);
+    a.mov_reg(0U, 25U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(10U, 2U, 0xE8U);
+
+    const std::vector<std::uint8_t> open_save_file_payload{
+        3U, 0U, 0U, 0U
+    };
+    emit_cmif_request(a, 8U, IpcDescriptorKind::Pointer,
+                      kStage8StringsAddress + 19U, 9U,
+                      open_save_file_payload);
+    a.ldr_w(0U, 2U, 0xE8U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 24U);
+    a.cbz(10U, "save_file_opened");
+    const std::vector<std::uint8_t> create_save_file_payload(8U, 0U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Pointer,
+                      kStage8StringsAddress + 19U, 9U,
+                      create_save_file_payload);
+    a.ldr_w(0U, 2U, 0xE8U);
+    a.svc(0x21U);
+    emit_cmif_request(a, 8U, IpcDescriptorKind::Pointer,
+                      kStage8StringsAddress + 19U, 9U,
+                      open_save_file_payload);
+    a.ldr_w(0U, 2U, 0xE8U);
+    a.svc(0x21U);
+    a.bind("save_file_opened");
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0xECU);
+
+    const std::vector<std::uint8_t> read_save_payload{
+        0U,0U,0U,0U,0U,0U,0U,0U,
+        8U,0U,0U,0U,0U,0U,0U,0U
+    };
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Receive,
+                      kStage6ScratchAddress + 0x420U, 8U,
+                      read_save_payload);
+    a.ldr_w(0U, 2U, 0xECU);
+    a.svc(0x21U);
+    a.ldr_x(10U, 20U, 32U);
+    a.cbz(10U, "save_position_default");
+    a.ldr_w(19U, 2U, 0x420U);
+    a.ldr_w(18U, 2U, 0x424U);
+    a.branch("save_position_seed");
+    a.bind("save_position_default");
+    a.movz(19U, 100U);
+    a.movz(18U, 100U);
+    a.bind("save_position_seed");
+    a.ldr_x(10U, 2U, 0x80U);
+    a.mov64(11U, kSharedThreadDataOffset);
+    a.add_reg(10U, 10U, 11U);
+    a.str_w(19U, 10U, 4U);
+
     emit_named_service_request(a, kSelfTestStringsAddress + 16U);
     a.mov_reg(0U, 19U);
     a.svc(0x21U);
@@ -713,8 +844,9 @@ std::vector<std::uint32_t> build_self_test_program() {
 
     a.mov64(15U, kHidMappingAddress + 0x9A28U);
     a.mov64(16U, kSpriteBufferAddress);
-    a.movz(19U, 100U);
-    a.movz(18U, 100U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.ldr_w(19U, 2U, 0xF0U);
+    a.ldr_w(18U, 2U, 0xF4U);
     a.mov64(17U, 0xFF101820U);
     a.movz(24U, 0U);
 
@@ -820,6 +952,28 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.bind("wrap_y");
     a.movz(18U, 0U);
     a.bind("y_ready");
+
+    a.and_imm(1U, 0U, 62U, 0U);
+    a.cbz(1U, "persistent_save_done");
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(19U, 2U, 0x420U);
+    a.str_w(18U, 2U, 0x424U);
+    const std::vector<std::uint8_t> write_save_payload{
+        0U,0U,0U,0U,0U,0U,0U,0U,
+        8U,0U,0U,0U,0U,0U,0U,0U
+    };
+    emit_cmif_request(a, 1U, IpcDescriptorKind::Send,
+                      kStage6ScratchAddress + 0x420U, 8U,
+                      write_save_payload);
+    a.ldr_w(0U, 2U, 0xECU);
+    a.svc(0x21U);
+    emit_cmif_request(a, 2U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0xECU);
+    a.svc(0x21U);
+    emit_cmif_request(a, 10U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0xE8U);
+    a.svc(0x21U);
+    a.bind("persistent_save_done");
 
     a.mov_reg(0U, 19U);
     a.mov_reg(1U, 18U);
@@ -981,8 +1135,16 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
                horizon::Permission::Read | horizon::Permission::Execute);
     memory.map(kSelfTestStringsAddress, service_strings,
                horizon::Permission::Read);
-    std::cout << "HorizonLite Stage 7 self-test: main and worker threads share an atomic mutex, "
-                 "the worker updates sprite motion with ARM64 FP instructions, and vi:m presents frames.\n";
+    const std::vector<std::uint8_t> stage8_strings{
+        'a','c','c',':','u','0',0U,
+        's','e','t',':','s','y','s',0U,
+        's','e','t',0U,
+        '/','p','o','s','.','b','i','n',0U
+    };
+    memory.map(kStage8StringsAddress, stage8_strings,
+               horizon::Permission::Read);
+    std::cout << "HorizonLite Stage 8 self-test: Account, System Settings and persistent save-data IPC, "
+                 "plus threaded sprite motion through vi:m.\n";
     return kSelfTestTextAddress;
 }
 
