@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -35,12 +37,16 @@ constexpr std::uint64_t kTlsAddress = 0x10000000ULL;
 constexpr std::size_t kTlsSize = 0x1000U;
 constexpr std::uint64_t kSelfTestTextAddress = 0x00100000ULL;
 constexpr std::uint64_t kSelfTestStringsAddress = 0x00110000ULL;
+constexpr std::uint64_t kStage8StringsAddress = 0x00112000ULL;
 constexpr std::uint64_t kHidMappingAddress = 0x20000000ULL;
 constexpr std::uint64_t kSpriteBufferAddress = 0x21000000ULL;
 constexpr std::uint64_t kPcmBufferAddress = 0x22000000ULL;
 constexpr std::uint64_t kAudioBufferHeaderAddress = 0x22010000ULL;
 constexpr std::uint64_t kAudioReleasedArrayAddress = 0x22011000ULL;
 constexpr std::uint64_t kStage6ScratchAddress = 0x23000000ULL;
+constexpr std::uint64_t kWorkerThreadTextAddress = 0x00108000ULL;
+constexpr std::uint64_t kSharedThreadDataOffset = 0x00900000ULL;
+constexpr std::uint32_t kMainThreadHandle = 0x101U;
 constexpr std::uint64_t kStopAddress = std::numeric_limits<std::uint64_t>::max();
 constexpr std::size_t kInteractiveInstructionBudget = 180000U;
 constexpr std::size_t kHeadlessInstructionLimit = 1000000U;
@@ -128,6 +134,35 @@ public:
 
     void strh(unsigned rt, unsigned rn, unsigned offset) {
         emit(0x79000000U | ((offset / 2U) << 10U) | (rn << 5U) | rt);
+    }
+
+    void ldaxr_w(unsigned rt, unsigned rn) {
+        emit(0x885FFC00U | (rn << 5U) | rt);
+    }
+
+    void stlxr_w(unsigned rs, unsigned rt, unsigned rn) {
+        emit(0x8800FC00U | (rs << 16U) | (rn << 5U) | rt);
+    }
+
+    void scvtf_s(unsigned rd, unsigned rn) {
+        emit(0x1E220000U | (rn << 5U) | rd);
+    }
+
+    void fmov_s_imm(unsigned rd, std::uint8_t immediate) {
+        emit(0x1E201000U |
+             (static_cast<std::uint32_t>(immediate) << 13U) | rd);
+    }
+
+    void fadd_s(unsigned rd, unsigned rn, unsigned rm) {
+        emit(0x1E202800U | (rm << 16U) | (rn << 5U) | rd);
+    }
+
+    void fmul_s(unsigned rd, unsigned rn, unsigned rm) {
+        emit(0x1E200800U | (rm << 16U) | (rn << 5U) | rd);
+    }
+
+    void fcvtzs_w_s(unsigned rd, unsigned rn) {
+        emit(0x1E380000U | (rn << 5U) | rd);
     }
 
     void ldr_w(unsigned rt, unsigned rn, unsigned offset) {
@@ -340,6 +375,41 @@ void emit_named_service_request(A64Assembler& a, std::uint64_t name_address) {
                       name_address, 8U);
 }
 
+std::vector<std::uint32_t> build_worker_thread_program() {
+    A64Assembler a;
+    a.mov_reg(19U, 0U);
+
+    a.bind("worker_lock_retry");
+    a.ldaxr_w(2U, 19U);
+    a.cbz(2U, "worker_try_atomic_lock");
+    a.mov_reg(0U, 2U);
+    a.mov_reg(1U, 19U);
+    a.ldr_w(2U, 19U, 8U);
+    a.svc(0x1AU);
+    a.branch("worker_mutex_acquired");
+
+    a.bind("worker_try_atomic_lock");
+    a.ldr_w(3U, 19U, 8U);
+    a.stlxr_w(4U, 3U, 19U);
+    a.cbnz(4U, "worker_lock_retry");
+
+    a.bind("worker_mutex_acquired");
+    a.ldr_w(5U, 19U, 4U);
+    a.scvtf_s(0U, 5U);
+    a.fmov_s_imm(1U, 0x70U);
+    a.fmul_s(2U, 0U, 1U);
+    a.fadd_s(2U, 2U, 1U);
+    a.fcvtzs_w_s(5U, 2U);
+    a.str_w(5U, 19U, 4U);
+
+    a.mov_reg(0U, 19U);
+    a.svc(0x1BU);
+    a.mov64(0U, 1000000U);
+    a.svc(0x0CU);
+    a.branch("worker_lock_retry");
+    return a.finish();
+}
+
 std::vector<std::uint32_t> build_self_test_program() {
     A64Assembler a;
 
@@ -348,11 +418,91 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.mov_reg(19U, 1U);
     a.mrs_tpidrro(20U);
 
+    emit_named_service_request(a, kStage8StringsAddress);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(14U, 20U, 12U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(14U, 2U, 0xB4U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 14U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 32U);
+    a.str_w(10U, 2U, 0xB0U);
+    emit_cmif_request(a, 4U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 14U);
+    a.svc(0x21U);
+    a.ldr_x(10U, 20U, 32U);
+    a.ldr_x(11U, 20U, 40U);
+    a.str_x(10U, 2U, 0xC0U);
+    a.str_x(11U, 2U, 0xC8U);
+
+    std::vector<std::uint8_t> user_uid_payload(16U, 0U);
+    for (unsigned byte = 0U; byte < 8U; ++byte) {
+        user_uid_payload[byte] = static_cast<std::uint8_t>(0x0000000000000001ULL >> (byte * 8U));
+        user_uid_payload[8U + byte] = static_cast<std::uint8_t>(0x1122334455667788ULL >> (byte * 8U));
+    }
+    emit_cmif_request(a, 1U, IpcDescriptorKind::None, 0U, 0U, user_uid_payload);
+    a.mov_reg(0U, 14U);
+    a.svc(0x21U);
+    emit_cmif_request(a, 5U, IpcDescriptorKind::None, 0U, 0U, user_uid_payload);
+    a.mov_reg(0U, 14U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0xCCU);
+    emit_cmif_request(a, 1U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0xCCU);
+    a.svc(0x21U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Receive,
+                      kStage6ScratchAddress + 0x600U, 0x80U);
+    a.ldr_w(0U, 2U, 0xCCU);
+    a.svc(0x21U);
+
+    emit_named_service_request(a, kStage8StringsAddress + 7U);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(13U, 20U, 12U);
+    a.str_w(13U, 2U, 0xD8U);
+    emit_cmif_request(a, 3U, IpcDescriptorKind::Receive,
+                      kStage6ScratchAddress + 0x500U, 0x100U);
+    a.ldr_w(0U, 2U, 0xD8U);
+    a.svc(0x21U);
+    emit_named_service_request(a, kStage8StringsAddress + 15U);
+    a.mov_reg(0U, 19U);
+    a.svc(0x21U);
+    a.ldr_w(12U, 20U, 12U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 12U);
+    a.svc(0x21U);
+    a.ldr_x(10U, 20U, 32U);
+    a.str_x(10U, 2U, 0xE0U);
+    emit_cmif_request(a, 4U, IpcDescriptorKind::None, 0U, 0U);
+    a.mov_reg(0U, 12U);
+    a.svc(0x21U);
+
     a.movz(0U, 0U);
     a.mov64(1U, 0x00C00000U);
     a.svc(0x01U);
     a.mov64(2U, kStage6ScratchAddress);
     a.str_x(1U, 2U, 0x80U);
+
+    a.mov_reg(8U, 1U);
+    a.mov64(10U, kSharedThreadDataOffset);
+    a.add_reg(9U, 8U, 10U);
+    a.movz(11U, 0U);
+    a.str_w(11U, 9U, 0U);
+    a.movz(11U, 100U);
+    a.str_w(11U, 9U, 4U);
+    a.mov64(1U, kWorkerThreadTextAddress);
+    a.mov_reg(2U, 9U);
+    a.mov64(10U, 0x00C00000U);
+    a.add_reg(3U, 8U, 10U);
+    a.mov64(4U, 0x2CU);
+    a.movz(5U, 0U);
+    a.svc(0x08U);
+    a.str_w(1U, 9U, 8U);
+    a.mov_reg(0U, 1U);
+    a.svc(0x0AU);
 
     emit_named_service_request(a, kSelfTestStringsAddress + 48U);
     a.mov_reg(0U, 19U);
@@ -569,8 +719,77 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.mov_reg(0U, 26U);
     a.svc(0x21U);
 
+    std::vector<std::uint8_t> save_attribute(0x48U, 0U);
+    const std::uint64_t save_program_id = 0x0100000000000000ULL;
+    for (unsigned byte = 0U; byte < 8U; ++byte) {
+        save_attribute[8U + byte] =
+            static_cast<std::uint8_t>(save_program_id >> (byte * 8U));
+        save_attribute[16U + byte] =
+            static_cast<std::uint8_t>(0x0000000000000001ULL >> (byte * 8U));
+        save_attribute[24U + byte] =
+            static_cast<std::uint8_t>(0x1122334455667788ULL >> (byte * 8U));
+    }
+    emit_cmif_request(a, 51U, IpcDescriptorKind::None, 0U, 0U,
+                      save_attribute);
+    a.mov_reg(0U, 25U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 12U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(10U, 2U, 0xE8U);
+
+    const std::vector<std::uint8_t> open_save_file_payload{
+        3U, 0U, 0U, 0U
+    };
+    emit_cmif_request(a, 8U, IpcDescriptorKind::Pointer,
+                      kStage8StringsAddress + 19U, 9U,
+                      open_save_file_payload);
+    a.ldr_w(0U, 2U, 0xE8U);
+    a.svc(0x21U);
+    a.ldr_w(10U, 20U, 24U);
+    a.cbz(10U, "save_file_opened");
+    const std::vector<std::uint8_t> create_save_file_payload(8U, 0U);
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Pointer,
+                      kStage8StringsAddress + 19U, 9U,
+                      create_save_file_payload);
+    a.ldr_w(0U, 2U, 0xE8U);
+    a.svc(0x21U);
+    emit_cmif_request(a, 8U, IpcDescriptorKind::Pointer,
+                      kStage8StringsAddress + 19U, 9U,
+                      open_save_file_payload);
+    a.ldr_w(0U, 2U, 0xE8U);
+    a.svc(0x21U);
+    a.bind("save_file_opened");
+    a.ldr_w(10U, 20U, 12U);
+    a.str_w(10U, 2U, 0xECU);
+
+    const std::vector<std::uint8_t> read_save_payload{
+        0U,0U,0U,0U,0U,0U,0U,0U,
+        8U,0U,0U,0U,0U,0U,0U,0U
+    };
+    emit_cmif_request(a, 0U, IpcDescriptorKind::Receive,
+                      kStage6ScratchAddress + 0x420U, 8U,
+                      read_save_payload);
+    a.ldr_w(0U, 2U, 0xECU);
+    a.svc(0x21U);
+    a.ldr_x(10U, 20U, 32U);
+    a.cbz(10U, "save_position_default");
+    a.ldr_w(19U, 2U, 0x420U);
+    a.ldr_w(18U, 2U, 0x424U);
+    a.branch("save_position_seed");
+    a.bind("save_position_default");
+    a.movz(19U, 100U);
+    a.movz(18U, 100U);
+    a.bind("save_position_seed");
+    a.ldr_x(10U, 2U, 0x80U);
+    a.mov64(11U, kSharedThreadDataOffset);
+    a.add_reg(10U, 10U, 11U);
+    a.str_w(19U, 10U, 4U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(19U, 2U, 0xF0U);
+    a.str_w(18U, 2U, 0xF4U);
+
     emit_named_service_request(a, kSelfTestStringsAddress + 16U);
-    a.mov_reg(0U, 21U);
+    a.mov_reg(0U, 19U);
     a.svc(0x21U);
     a.ldr_w(27U, 20U, 12U);
 
@@ -628,8 +847,9 @@ std::vector<std::uint32_t> build_self_test_program() {
 
     a.mov64(15U, kHidMappingAddress + 0x9A28U);
     a.mov64(16U, kSpriteBufferAddress);
-    a.movz(19U, 100U);
-    a.movz(18U, 100U);
+    a.mov64(2U, kStage6ScratchAddress);
+    a.ldr_w(19U, 2U, 0xF0U);
+    a.ldr_w(18U, 2U, 0xF4U);
     a.mov64(17U, 0xFF101820U);
     a.movz(24U, 0U);
 
@@ -650,33 +870,60 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.add_imm(29U, 29U, 0x00400000U, true);
     a.bind("use_framebuffer_slot_zero");
 
+    a.mov64(10U, kStage6ScratchAddress);
+    a.ldr_x(13U, 10U, 0x80U);
+    a.mov64(11U, kSharedThreadDataOffset);
+    a.add_reg(13U, 13U, 11U);
+
+    a.bind("main_lock_retry");
+    a.ldaxr_w(10U, 13U);
+    a.cbz(10U, "main_try_atomic_lock");
+    a.mov_reg(0U, 10U);
+    a.mov_reg(1U, 13U);
+    a.mov64(2U, kMainThreadHandle);
+    a.svc(0x1AU);
+    a.branch("main_mutex_acquired");
+
+    a.bind("main_try_atomic_lock");
+    a.mov64(11U, kMainThreadHandle);
+    a.stlxr_w(12U, 11U, 13U);
+    a.cbnz(12U, "main_lock_retry");
+
+    a.bind("main_mutex_acquired");
+    a.movz(0U, 0U);
+    a.svc(0x0CU);
+    a.ldr_w(19U, 13U, 4U);
+    a.mov_reg(0U, 13U);
+    a.svc(0x1BU);
+
     a.mov_reg(0U, 19U);
     a.mov_reg(1U, 18U);
     a.mov_reg(2U, 17U);
     a.branch_link("draw_solid_sprite_area");
 
     a.ldr_x(0U, 15U, 0U);
-    a.and_imm(1U, 0U, 52U, 0U);
+    a.mov_reg(26U, 0U);
+    a.and_imm(1U, 26U, 52U, 0U);
     a.cbz(1U, "not_left");
     a.sub_imm(19U, 19U, 2U);
     a.bind("not_left");
 
-    a.and_imm(1U, 0U, 51U, 0U);
+    a.and_imm(1U, 26U, 51U, 0U);
     a.cbz(1U, "not_up");
     a.sub_imm(18U, 18U, 2U);
     a.bind("not_up");
 
-    a.and_imm(1U, 0U, 50U, 0U);
+    a.and_imm(1U, 26U, 50U, 0U);
     a.cbz(1U, "not_right");
     a.add_imm(19U, 19U, 2U);
     a.bind("not_right");
 
-    a.and_imm(1U, 0U, 49U, 0U);
+    a.and_imm(1U, 26U, 49U, 0U);
     a.cbz(1U, "not_down");
     a.add_imm(18U, 18U, 2U);
     a.bind("not_down");
 
-    a.and_imm(1U, 0U, 0U, 0U);
+    a.and_imm(1U, 26U, 0U, 0U);
     a.cbz(1U, "audio_button_released");
     a.cbnz(24U, "audio_button_done");
     emit_cmif_request(a, 7U, IpcDescriptorKind::AutoSend,
@@ -709,6 +956,28 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.bind("wrap_y");
     a.movz(18U, 0U);
     a.bind("y_ready");
+
+    a.and_imm(1U, 26U, 62U, 0U);
+    a.cbz(1U, "persistent_save_done");
+    a.mov64(2U, kStage6ScratchAddress);
+    a.str_w(19U, 2U, 0x420U);
+    a.str_w(18U, 2U, 0x424U);
+    const std::vector<std::uint8_t> write_save_payload{
+        0U,0U,0U,0U,0U,0U,0U,0U,
+        8U,0U,0U,0U,0U,0U,0U,0U
+    };
+    emit_cmif_request(a, 1U, IpcDescriptorKind::Send,
+                      kStage6ScratchAddress + 0x420U, 8U,
+                      write_save_payload);
+    a.ldr_w(0U, 2U, 0xECU);
+    a.svc(0x21U);
+    emit_cmif_request(a, 2U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0xECU);
+    a.svc(0x21U);
+    emit_cmif_request(a, 10U, IpcDescriptorKind::None, 0U, 0U);
+    a.ldr_w(0U, 2U, 0xE8U);
+    a.svc(0x21U);
+    a.bind("persistent_save_done");
 
     a.mov_reg(0U, 19U);
     a.mov_reg(1U, 18U);
@@ -859,10 +1128,27 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
     };
     memory.map(kSelfTestTextAddress, std::move(text),
                horizon::Permission::Read | horizon::Permission::Execute);
+    const auto worker_instructions = build_worker_thread_program();
+    std::vector<std::uint8_t> worker_text;
+    worker_text.reserve(worker_instructions.size() * sizeof(std::uint32_t));
+    for (const std::uint32_t instruction : worker_instructions) {
+        for (unsigned byte = 0U; byte < 4U; ++byte)
+            worker_text.push_back(static_cast<std::uint8_t>(instruction >> (byte * 8U)));
+    }
+    memory.map(kWorkerThreadTextAddress, std::move(worker_text),
+               horizon::Permission::Read | horizon::Permission::Execute);
     memory.map(kSelfTestStringsAddress, service_strings,
                horizon::Permission::Read);
-    std::cout << "HorizonLite Stage 6 self-test: guest allocates two nvmap frame slots from its heap, "
-                 "opens vi:m, transacts with IGraphicBufferProducer, and queues the RomFS sprite.\n";
+    const std::vector<std::uint8_t> stage8_strings{
+        'a','c','c',':','u','0',0U,
+        's','e','t',':','s','y','s',0U,
+        's','e','t',0U,
+        '/','p','o','s','.','b','i','n',0U
+    };
+    memory.map(kStage8StringsAddress, stage8_strings,
+               horizon::Permission::Read);
+    std::cout << "HorizonLite Stage 8 self-test: Account, System Settings and persistent save-data IPC, "
+                 "plus threaded sprite motion through vi:m.\n";
     return kSelfTestTextAddress;
 }
 
@@ -897,42 +1183,75 @@ LoadedProgram load_program(const Options& options,
     return LoadedProgram{image.entry_point, image.romfs, false};
 }
 
-void verify_self_test(std::span<const std::uint8_t> pixels,
+void verify_self_test(const horizon::AddressSpace& memory,
+                       std::span<const std::uint8_t> pixels,
                        std::uint64_t frame_number) {
-    const std::size_t pixel_offset =
-        (static_cast<std::size_t>(101U) * kFramebufferWidth + 101U) * 4U;
     constexpr std::uint32_t expected_rgba = 0xFFF0B842U;
     if (pixels.size() < kFramebufferBytes || frame_number == 0U)
         throw std::runtime_error("Display self-test did not queue a complete framebuffer");
-    const std::uint32_t actual =
-        static_cast<std::uint32_t>(pixels[pixel_offset]) |
-        (static_cast<std::uint32_t>(pixels[pixel_offset + 1U]) << 8U) |
-        (static_cast<std::uint32_t>(pixels[pixel_offset + 2U]) << 16U) |
-        (static_cast<std::uint32_t>(pixels[pixel_offset + 3U]) << 24U);
-    if (actual != expected_rgba) {
-        std::cerr << "  Display pixel probe: 0x" << std::hex
-                  << actual << std::dec << '\n';
-        throw std::runtime_error("vi:m/nvmap QueueBuffer did not present the expected guest sprite pixel");
+
+    bool sprite_pixel_found = false;
+    for (std::size_t offset = 0U; offset + 4U <= kFramebufferBytes; offset += 4U) {
+        const std::uint32_t pixel =
+            static_cast<std::uint32_t>(pixels[offset]) |
+            (static_cast<std::uint32_t>(pixels[offset + 1U]) << 8U) |
+            (static_cast<std::uint32_t>(pixels[offset + 2U]) << 16U) |
+            (static_cast<std::uint32_t>(pixels[offset + 3U]) << 24U);
+        if (pixel == expected_rgba) {
+            sprite_pixel_found = true;
+            break;
+        }
     }
-    std::cout << "vi:m + nvdrv/nvmap + Binder QueueBuffer self-test passed\n"
-              << "  Presented sprite pixel: 0x" << std::hex << actual << std::dec
+
+    const std::uint64_t heap_base = memory.read_u64(kStage6ScratchAddress + 0x80U);
+    const std::uint64_t shared_data =
+        heap_base + kSharedThreadDataOffset;
+    const std::uint32_t worker_position =
+        memory.read_u32(shared_data + 4U);
+    const std::filesystem::path save_path =
+        std::filesystem::path("save_data") /
+        "11223344556677880000000000000001" /
+        "0100000000000000" / "pos.bin";
+    if (!std::filesystem::exists(save_path) ||
+        std::filesystem::file_size(save_path) != 8U) {
+        throw std::runtime_error("persistent save-data file was not created with the 8-byte sprite state");
+    }
+    if (!sprite_pixel_found || worker_position == 100U) {
+        std::cerr << "  Sprite pixel found: " << sprite_pixel_found
+                  << "  Worker position: " << worker_position << '\n';
+        throw std::runtime_error(
+            "vi:m QueueBuffer did not present the moving RomFS sprite from the worker thread");
+    }
+    std::uint32_t saved_x = 0U;
+    std::uint32_t saved_y = 0U;
+    {
+        std::ifstream input(save_path, std::ios::binary);
+        input.read(reinterpret_cast<char*>(&saved_x), sizeof(saved_x));
+        input.read(reinterpret_cast<char*>(&saved_y), sizeof(saved_y));
+        if (!input)
+            throw std::runtime_error("saved sprite coordinates could not be read back");
+    }
+    std::cout << "Account + set:sys + fsp-srv persistent save-data self-test passed\n"
+              << "  Saved sprite: (" << saved_x << ", " << saved_y << ")"
+              << "  Worker position: " << worker_position
               << "  Frames: " << frame_number << '\n';
 }
-
 int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
                  const horizon::AddressSpace& memory, bool self_test) {
     if (self_test) {
-        kernel.update_hid_input(horizon::HidButtonA);
+        kernel.update_hid_input(horizon::HidButtonA | horizon::HidButtonX);
         const std::size_t executed =
-            cpu.run(kHeadlessInstructionLimit, kStopAddress);
+            kernel.run_scheduler(cpu, kHeadlessInstructionLimit, kStopAddress);
         std::cout << "Executed guest instructions: " << executed << '\n';
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         kernel.update_audio_events();
-        verify_self_test(kernel.display_pixels(), kernel.display_frame_number());
+        verify_self_test(memory, kernel.display_pixels(),
+                        kernel.display_frame_number());
         return 0;
     }
 
-    const std::size_t executed = cpu.run(20000000U, kStopAddress);
+    const std::size_t executed =
+        kernel.run_scheduler(cpu, 20000000U, kStopAddress);
     std::cout << "Executed instructions: " << executed << '\n';
     if (kernel.running()) {
         std::cerr << "Execution reached the headless instruction limit.\n";
@@ -941,8 +1260,7 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
     return 0;
 }
 
-int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
-                    const horizon::AddressSpace& memory) {
+int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel) {
     horizon::SdlDisplay display;
     constexpr auto frame_duration = std::chrono::microseconds(16667);
     bool keep_open = true;
@@ -954,7 +1272,8 @@ int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
         kernel.update_hid_input(display.read_controller_buttons());
         kernel.update_audio_events();
         if (kernel.running())
-            (void)cpu.run(kInteractiveInstructionBudget, kStopAddress);
+            (void)kernel.run_scheduler(
+                cpu, kInteractiveInstructionBudget, kStopAddress, 750U);
         kernel.update_audio_events();
         display.render(kernel.display_pixels(),
                        kFramebufferWidth, kFramebufferHeight);
@@ -983,7 +1302,7 @@ int main(int argc, char** argv) {
 
         if (options.headless)
             return run_headless(cpu, kernel, memory, program.self_test);
-        return run_interactive(cpu, kernel, memory);
+        return run_interactive(cpu, kernel);
     } catch (const std::exception& error) {
         std::cerr << "HorizonLite: " << error.what() << '\n';
         return 1;

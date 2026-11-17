@@ -2,8 +2,11 @@
 
 #include "horizon/kernel.hpp"
 
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -27,6 +30,48 @@ std::int64_t sign_extend(std::uint64_t value, unsigned bits) noexcept {
 
 std::uint64_t width_mask(unsigned width) noexcept {
     return width == 32U ? 0xFFFFFFFFULL : UINT64_MAX;
+}
+
+std::uint64_t expand_fp_immediate(std::uint8_t immediate,
+                                  unsigned width) noexcept {
+    const unsigned exponent_bits = width == 32U ? 8U : 11U;
+    const unsigned fraction_bits = width == 32U ? 23U : 52U;
+    const std::uint64_t sign =
+        static_cast<std::uint64_t>((immediate >> 7U) & 1U);
+    const std::uint64_t b6 =
+        static_cast<std::uint64_t>((immediate >> 6U) & 1U);
+    const unsigned repeated_exponent_bits = exponent_bits - 3U;
+    const std::uint64_t repeated_exponent = b6 == 0U ? 0U :
+        ((1ULL << repeated_exponent_bits) - 1ULL);
+    const std::uint64_t exponent =
+        ((b6 ^ 1U) << (exponent_bits - 1U)) |
+        (repeated_exponent << 2U) |
+        static_cast<std::uint64_t>((immediate >> 4U) & 0x3U);
+    const unsigned repeated_fraction_bits = fraction_bits - 4U;
+    const std::uint64_t repeated_fraction =
+        ((immediate & 0x8U) == 0U || repeated_fraction_bits == 0U)
+        ? 0U : ((1ULL << repeated_fraction_bits) - 1ULL);
+    const std::uint64_t fraction =
+        (static_cast<std::uint64_t>(immediate & 0xFU) <<
+         repeated_fraction_bits) | repeated_fraction;
+    if (width == 32U) {
+        return (sign << 31U) | (exponent << 23U) | fraction;
+    }
+    return (sign << 63U) | (exponent << 52U) | fraction;
+}
+
+std::int64_t float_to_signed_integer(double value,
+                                          unsigned destination_width) noexcept {
+    if (std::isnan(value)) return 0;
+    const std::int64_t minimum = destination_width == 32U
+        ? static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())
+        : std::numeric_limits<std::int64_t>::min();
+    const std::int64_t maximum = destination_width == 32U
+        ? static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())
+        : std::numeric_limits<std::int64_t>::max();
+    if (value >= static_cast<double>(maximum)) return maximum;
+    if (value <= static_cast<double>(minimum)) return minimum;
+    return static_cast<std::int64_t>(std::trunc(value));
 }
 
 std::uint64_t rotate_right_width(std::uint64_t value, unsigned amount,
@@ -101,6 +146,11 @@ std::uint64_t Arm64Cpu::read_base(unsigned index) const noexcept {
 
 void Arm64Cpu::write_x(unsigned index, std::uint64_t value) noexcept {
     if (index < 31U) state_.x[index] = value;
+}
+
+void Arm64Cpu::invalidate_exclusive(std::uint64_t address,
+                                   std::size_t size) noexcept {
+    state_.exclusive_monitor.invalidate(address, size);
 }
 
 void Arm64Cpu::write_nzcv_sub(std::uint64_t lhs, std::uint64_t rhs,
@@ -334,6 +384,174 @@ void Arm64Cpu::step() {
         return;
     }
 
+    if (instruction == 0xD5033F5FU) {
+        state_.exclusive_monitor.clear();
+        return;
+    }
+
+    const std::uint32_t exclusive_load_class =
+        instruction & 0x3F7FFC00U;
+    if (exclusive_load_class == 0x085F7C00U ||
+        exclusive_load_class == 0x085FFC00U) {
+        const bool wide = ((instruction >> 30U) & 1U) != 0U;
+        const unsigned rn = (instruction >> 5U) & 0x1FU;
+        const unsigned rt = instruction & 0x1FU;
+        const std::size_t access_size = wide ? 8U : 4U;
+        const std::uint64_t address = read_base(rn);
+        if (wide) write_x(rt, memory_.read_u64(address));
+        else write_x(rt, memory_.read_u32(address));
+        state_.exclusive_monitor.valid = true;
+        state_.exclusive_monitor.address = address;
+        state_.exclusive_monitor.size = access_size;
+        return;
+    }
+
+    const std::uint32_t exclusive_store_class =
+        instruction & 0x3F20FC00U;
+    if (exclusive_store_class == 0x08007C00U ||
+        exclusive_store_class == 0x0800FC00U) {
+        const bool wide = ((instruction >> 30U) & 1U) != 0U;
+        const unsigned status_register = (instruction >> 16U) & 0x1FU;
+        const unsigned rn = (instruction >> 5U) & 0x1FU;
+        const unsigned rt = instruction & 0x1FU;
+        const std::size_t access_size = wide ? 8U : 4U;
+        const std::uint64_t address = read_base(rn);
+        const bool success =
+            state_.exclusive_monitor.matches(address, access_size);
+        if (success) {
+            invalidate_exclusive(address, access_size);
+            if (wide) memory_.write_u64(address, read_x(rt));
+            else memory_.write_u32(address, static_cast<std::uint32_t>(read_x(rt)));
+        }
+        write_x(status_register, success ? 0U : 1U);
+        state_.exclusive_monitor.clear();
+        return;
+    }
+
+    const std::uint32_t fp_move_class = instruction & 0xFFFFFC00U;
+    if (fp_move_class == 0x1E270000U ||
+        fp_move_class == 0x9E670000U) {
+        const bool wide = (instruction >> 31U) != 0U;
+        const unsigned rn = (instruction >> 5U) & 0x1FU;
+        const unsigned rd = instruction & 0x1FU;
+        state_.v[rd] = wide ? read_x(rn) :
+            static_cast<std::uint32_t>(read_x(rn));
+        return;
+    }
+    if (fp_move_class == 0x1E260000U ||
+        fp_move_class == 0x9E660000U) {
+        const bool wide = (instruction >> 31U) != 0U;
+        const unsigned rn = (instruction >> 5U) & 0x1FU;
+        const unsigned rd = instruction & 0x1FU;
+        write_x(rd, wide ? state_.v[rn] :
+                static_cast<std::uint32_t>(state_.v[rn]));
+        return;
+    }
+
+    const std::uint32_t fp_immediate_class =
+        instruction & 0xFF201FE0U;
+    if (fp_immediate_class == 0x1E201000U) {
+        const unsigned width = ((instruction >> 22U) & 1U) != 0U
+            ? 64U : 32U;
+        const unsigned rd = instruction & 0x1FU;
+        const auto immediate = static_cast<std::uint8_t>(
+            (instruction >> 13U) & 0xFFU);
+        state_.v[rd] = expand_fp_immediate(immediate, width);
+        return;
+    }
+
+    const std::uint32_t fp_compare_class =
+        instruction & 0xFF20FC1FU;
+    if (fp_compare_class == 0x1E202000U) {
+        const bool wide = ((instruction >> 22U) & 1U) != 0U;
+        const unsigned rn = (instruction >> 5U) & 0x1FU;
+        const unsigned rm = (instruction >> 16U) & 0x1FU;
+        const double lhs = wide
+            ? std::bit_cast<double>(state_.v[rn])
+            : static_cast<double>(std::bit_cast<float>(
+                static_cast<std::uint32_t>(state_.v[rn])));
+        const double rhs = wide
+            ? std::bit_cast<double>(state_.v[rm])
+            : static_cast<double>(std::bit_cast<float>(
+                static_cast<std::uint32_t>(state_.v[rm])));
+        std::uint32_t flags = 0U;
+        if (std::isnan(lhs) || std::isnan(rhs)) {
+            flags = kCarryFlag | kOverflowFlag;
+        } else if (lhs == rhs) {
+            flags = kZeroFlag | kCarryFlag;
+        } else if (lhs < rhs) {
+            flags = kNegativeFlag;
+        } else {
+            flags = kCarryFlag;
+        }
+        state_.pstate = (state_.pstate & ~kNzcvMask) | flags;
+        return;
+    }
+
+    const std::uint32_t fp_arithmetic_class =
+        instruction & 0xFF20FC00U;
+    if (fp_arithmetic_class == 0x1E202800U ||
+        fp_arithmetic_class == 0x1E203800U ||
+        fp_arithmetic_class == 0x1E200800U ||
+        fp_arithmetic_class == 0x1E201800U) {
+        const bool wide = ((instruction >> 22U) & 1U) != 0U;
+        const unsigned rm = (instruction >> 16U) & 0x1FU;
+        const unsigned rn = (instruction >> 5U) & 0x1FU;
+        const unsigned rd = instruction & 0x1FU;
+        const double lhs = wide
+            ? std::bit_cast<double>(state_.v[rn])
+            : static_cast<double>(std::bit_cast<float>(
+                static_cast<std::uint32_t>(state_.v[rn])));
+        const double rhs = wide
+            ? std::bit_cast<double>(state_.v[rm])
+            : static_cast<double>(std::bit_cast<float>(
+                static_cast<std::uint32_t>(state_.v[rm])));
+        double result = 0.0;
+        if (fp_arithmetic_class == 0x1E202800U) result = lhs + rhs;
+        else if (fp_arithmetic_class == 0x1E203800U) result = lhs - rhs;
+        else if (fp_arithmetic_class == 0x1E200800U) result = lhs * rhs;
+        else result = lhs / rhs;
+        if (wide) state_.v[rd] = std::bit_cast<std::uint64_t>(result);
+        else state_.v[rd] = std::bit_cast<std::uint32_t>(
+            static_cast<float>(result));
+        return;
+    }
+
+    const std::uint32_t fp_convert_class =
+        instruction & 0x5F3FFC00U;
+    if (fp_convert_class == 0x1E220000U) {
+        const bool source_wide = (instruction >> 31U) != 0U;
+        const bool destination_double = ((instruction >> 22U) & 1U) != 0U;
+        const unsigned rn = (instruction >> 5U) & 0x1FU;
+        const unsigned rd = instruction & 0x1FU;
+        const double value = source_wide
+            ? static_cast<double>(static_cast<std::int64_t>(read_x(rn)))
+            : static_cast<double>(static_cast<std::int32_t>(read_x(rn)));
+        if (destination_double) state_.v[rd] = std::bit_cast<std::uint64_t>(value);
+        else state_.v[rd] = std::bit_cast<std::uint32_t>(
+            static_cast<float>(value));
+        return;
+    }
+
+    const std::uint32_t fp_to_integer_class =
+        instruction & 0x5F3FFC00U;
+    if (fp_to_integer_class == 0x1E380000U ||
+        fp_to_integer_class == 0x1E780000U) {
+        const bool destination_wide = (instruction >> 31U) != 0U;
+        const bool source_double = ((instruction >> 22U) & 1U) != 0U;
+        const unsigned rn = (instruction >> 5U) & 0x1FU;
+        const unsigned rd = instruction & 0x1FU;
+        const double value = source_double
+            ? std::bit_cast<double>(state_.v[rn])
+            : static_cast<double>(std::bit_cast<float>(
+                static_cast<std::uint32_t>(state_.v[rn])));
+        const std::int64_t converted = float_to_signed_integer(
+            value, destination_wide ? 64U : 32U);
+        if (destination_wide) write_x(rd, static_cast<std::uint64_t>(converted));
+        else write_x(rd, static_cast<std::uint32_t>(converted));
+        return;
+    }
+
     const std::uint32_t memory_class = instruction & 0xFFC00000U;
     const bool store64 = memory_class == 0xF9000000U;
     const bool load64 = memory_class == 0xF9400000U;
@@ -359,14 +577,15 @@ void Arm64Cpu::step() {
             else if (halfword) write_x(rt, memory_.read_u16(address));
             else if (byte) write_x(rt, memory_.read_u8(address));
             else write_x(rt, memory_.read_u32(address));
-        } else if (wide) {
-            memory_.write_u64(address, read_x(rt));
-        } else if (halfword) {
-            memory_.write_u16(address, static_cast<std::uint16_t>(read_x(rt)));
-        } else if (byte) {
-            memory_.write_u8(address, static_cast<std::uint8_t>(read_x(rt)));
         } else {
-            memory_.write_u32(address, static_cast<std::uint32_t>(read_x(rt)));
+            invalidate_exclusive(address, wide ? 8U :
+                                  (halfword ? 2U : (byte ? 1U : 4U)));
+            if (wide) memory_.write_u64(address, read_x(rt));
+            else if (halfword)
+                memory_.write_u16(address, static_cast<std::uint16_t>(read_x(rt)));
+            else if (byte)
+                memory_.write_u8(address, static_cast<std::uint8_t>(read_x(rt)));
+            else memory_.write_u32(address, static_cast<std::uint32_t>(read_x(rt)));
         }
         return;
     }
@@ -432,6 +651,7 @@ std::size_t Arm64Cpu::run(std::size_t max_steps, std::uint64_t stop_pc) {
            svc_handler_.running()) {
         step();
         ++executed;
+        if (svc_handler_.yield_requested()) break;
     }
     return executed;
 }

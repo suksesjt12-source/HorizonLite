@@ -5,9 +5,12 @@
 #include "horizon/memory.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <span>
@@ -27,7 +30,11 @@ enum class KernelObjectKind : std::uint8_t {
     Event,
     AudioOut,
     BinderDriver,
-    DisplayLayer
+    DisplayLayer,
+    Thread,
+    Profile,
+    FileSystem,
+    File
 };
 
 class KObject {
@@ -59,6 +66,60 @@ class KSharedMemory final : public KObject {
 public:
     explicit KSharedMemory(std::size_t size);
     std::vector<std::uint8_t> bytes;
+};
+
+enum class ThreadStatus : std::uint8_t {
+    Suspended,
+    Runnable,
+    Sleeping,
+    WaitingLock,
+    WaitingSynchronization,
+    Terminated
+};
+
+class KThread final : public KObject {
+public:
+    explicit KThread(std::size_t thread_index);
+
+    Handle handle{};
+    std::size_t thread_index{};
+    CpuState context{};
+    ThreadStatus status{ThreadStatus::Suspended};
+    std::int32_t priority{0x2C};
+    std::int32_t processor_id{-1};
+    std::uint64_t waiting_mutex{};
+    std::vector<Handle> waiting_handles;
+    std::chrono::steady_clock::time_point wake_deadline{};
+    bool has_deadline{};
+};
+
+struct Uid {
+    std::uint64_t low{};
+    std::uint64_t high{};
+    friend bool operator==(const Uid&, const Uid&) = default;
+};
+
+class KFile;
+
+class KProfile final : public KObject {
+public:
+    KProfile();
+};
+
+class KFileSystem final : public KObject {
+public:
+    explicit KFileSystem(std::filesystem::path root_path);
+    std::filesystem::path root;
+    std::vector<std::weak_ptr<KFile>> open_files;
+};
+
+class KFile final : public KObject {
+public:
+    KFile(std::filesystem::path file_path, std::uint32_t open_mode);
+    ~KFile() override;
+    std::filesystem::path path;
+    std::uint32_t open_mode{};
+    std::fstream stream;
 };
 
 class KStorage final : public KObject {
@@ -198,6 +259,19 @@ public:
     void svc_close_handle(CpuState& state);
     void svc_reset_signal(CpuState& state);
     void svc_wait_synchronization(CpuState& state);
+    void svc_create_thread(CpuState& state);
+    void svc_start_thread(CpuState& state);
+    void svc_exit_thread(CpuState& state) noexcept;
+    void svc_sleep_thread(CpuState& state);
+    void svc_arbitrate_lock(CpuState& state);
+    void svc_arbitrate_unlock(CpuState& state);
+    void initialize_scheduler(const CpuState& initial_context);
+    [[nodiscard]] std::size_t run_scheduler(
+        Arm64Cpu& cpu, std::size_t max_instructions,
+        std::uint64_t stop_pc, std::size_t time_slice = 750U);
+    [[nodiscard]] std::size_t scheduled_thread_count() const noexcept;
+    [[nodiscard]] Handle current_thread_handle() const noexcept;
+    [[nodiscard]] bool yield_requested() const noexcept;
     void update_hid_input(std::uint64_t buttons);
     void update_audio_events();
 
@@ -219,6 +293,21 @@ private:
         const KClientSession& session, const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_storage(
         const KStorage& storage, const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_account(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_profile(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_system_settings(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_settings(
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_file_system(
+        const std::shared_ptr<KFileSystem>& file_system,
+        const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_file(
+        const std::shared_ptr<KFile>& file, const CmifRequest& request);
+    [[nodiscard]] std::filesystem::path resolve_save_path(
+        const std::filesystem::path& root, const std::string& guest_path) const;
     [[nodiscard]] CmifResponse dispatch_audio_manager(
         const CmifRequest& request);
     [[nodiscard]] CmifResponse dispatch_nvdrv(
@@ -243,6 +332,12 @@ private:
         const CmifRequest& request) const noexcept;
     void update_audio_out(const std::shared_ptr<KAudioOut>& audio_out);
     void release_all_audio_buffers(const std::shared_ptr<KAudioOut>& audio_out);
+    void request_scheduler_yield() noexcept;
+    void reset_all_exclusive_monitors() noexcept;
+    void update_thread_waiters();
+    [[nodiscard]] std::shared_ptr<KThread> find_thread(Handle handle) const noexcept;
+    [[nodiscard]] std::shared_ptr<KThread> next_runnable_thread();
+    [[nodiscard]] bool any_runnable_thread() const noexcept;
 
     static constexpr std::uint64_t kHeapBase = 0x50000000ULL;
     static constexpr std::uint64_t kMaximumHeapSize = 0x10000000ULL;
@@ -262,10 +357,18 @@ private:
     std::unordered_map<std::int32_t, std::string> nv_devices_;
     std::unordered_map<std::uint32_t, NvMapBuffer> nvmap_buffers_;
     std::shared_ptr<KDisplayLayer> display_layer_;
+    std::filesystem::path save_data_root_{"save_data"};
     std::int32_t next_nv_fd_{3};
     std::uint32_t next_nvmap_handle_{1U};
     std::uint32_t next_nvmap_id_{1U};
     std::unordered_map<Handle, SharedMapping> shared_mappings_;
+    std::vector<std::shared_ptr<KThread>> threads_;
+    std::shared_ptr<KThread> active_thread_;
+    std::shared_ptr<KThread> main_thread_;
+    std::size_t next_thread_index_{1U};
+    std::size_t scheduler_cursor_{};
+    bool scheduler_initialized_{};
+    bool scheduler_yield_requested_{};
     std::uint64_t sampling_number_{};
     std::uint64_t heap_size_{};
     bool running_{true};
@@ -276,6 +379,7 @@ public:
     explicit SvcHandler(HorizonKernel& kernel) noexcept;
     void dispatch(std::uint16_t immediate, CpuState& state);
     [[nodiscard]] bool running() const noexcept;
+    [[nodiscard]] bool yield_requested() const noexcept;
 private:
     HorizonKernel& kernel_;
 };

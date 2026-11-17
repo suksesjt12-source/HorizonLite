@@ -2,11 +2,17 @@
 #include "horizon/display.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
+#include <thread>
 #include <utility>
 
 namespace horizon {
@@ -159,6 +165,35 @@ const std::string& KClientSession::service_name() const noexcept {
 
 KSharedMemory::KSharedMemory(std::size_t size)
     : KObject(KernelObjectKind::SharedMemory), bytes(size, 0U) {}
+
+KThread::KThread(std::size_t index)
+    : KObject(KernelObjectKind::Thread), thread_index(index) {}
+
+KProfile::KProfile() : KObject(KernelObjectKind::Profile) {}
+
+KFileSystem::KFileSystem(std::filesystem::path root_path)
+    : KObject(KernelObjectKind::FileSystem), root(std::move(root_path)) {
+    std::filesystem::create_directories(root);
+}
+
+KFile::KFile(std::filesystem::path file_path, std::uint32_t mode)
+    : KObject(KernelObjectKind::File),
+      path(std::move(file_path)),
+      open_mode(mode) {
+    std::ios::openmode flags = std::ios::binary;
+    if ((mode & 1U) != 0U || (mode & 2U) != 0U) flags |= std::ios::in;
+    if ((mode & 2U) != 0U) flags |= std::ios::out;
+    stream.open(path, flags);
+    if (!stream.is_open())
+        throw std::runtime_error("failed to open save-data file");
+}
+
+KFile::~KFile() {
+    if (stream.is_open()) {
+        stream.flush();
+        stream.close();
+    }
+}
 
 KEvent::KEvent() noexcept : KObject(KernelObjectKind::Event) {}
 
@@ -457,6 +492,391 @@ void HorizonKernel::svc_connect_to_named_port(CpuState& state) {
     }
 }
 
+
+CmifResponse HorizonKernel::dispatch_account(const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    constexpr Uid profile_uid{0x0000000000000001ULL, 0x1122334455667788ULL};
+
+    switch (request.command_id) {
+    case 0U:
+        append_le32(response.data, 1U);
+        return response;
+    case 1U:
+        if (request.data.size() < 16U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        append_le32(response.data,
+            read_le64(request.data, 0U) == profile_uid.low &&
+            read_le64(request.data, 8U) == profile_uid.high ? 1U : 0U);
+        return response;
+    case 2U:
+    case 3U: {
+        const IpcBufferDescriptor* output = nullptr;
+        if (!request.pointer_buffers.empty()) output = &request.pointer_buffers.front();
+        else output = find_receive_buffer(request);
+        if (output == nullptr || output->size < 16U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        std::vector<std::uint8_t> uid;
+        append_le64(uid, profile_uid.low);
+        append_le64(uid, profile_uid.high);
+        memory_.write(output->address, uid);
+        return response;
+    }
+    case 4U:
+        append_le64(response.data, profile_uid.low);
+        append_le64(response.data, profile_uid.high);
+        return response;
+    case 5U:
+        if (request.data.size() < 16U ||
+            read_le64(request.data, 0U) != profile_uid.low ||
+            read_le64(request.data, 8U) != profile_uid.high) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        response.handle = handles_.insert(std::make_shared<KProfile>());
+        response.move_handle = true;
+        return response;
+    case 100U:
+    case 140U:
+        return response;
+    default:
+        response.result = kInvalidCommand;
+        return response;
+    }
+}
+
+CmifResponse HorizonKernel::dispatch_profile(const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    constexpr Uid profile_uid{0x0000000000000001ULL, 0x1122334455667788ULL};
+    std::vector<std::uint8_t> base(0x38U, 0U);
+    for (unsigned byte = 0U; byte < 8U; ++byte) {
+        base[byte] = static_cast<std::uint8_t>(profile_uid.low >> (byte * 8U));
+        base[8U + byte] = static_cast<std::uint8_t>(profile_uid.high >> (byte * 8U));
+    }
+    const std::string nickname = "Player1";
+    std::copy(nickname.begin(), nickname.end(), base.begin() + 24U);
+
+    if (request.command_id == 1U) {
+        response.data = std::move(base);
+        return response;
+    }
+    if (request.command_id == 0U) {
+        const IpcBufferDescriptor* output = find_receive_buffer(request);
+        if (output == nullptr || output->size < 0x80U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        std::vector<std::uint8_t> user_data(0x80U, 0U);
+        std::copy(base.begin(), base.begin() + 16U, user_data.begin());
+        memory_.write(output->address, user_data);
+        response.data = std::move(base);
+        return response;
+    }
+    response.result = kInvalidCommand;
+    return response;
+}
+
+CmifResponse HorizonKernel::dispatch_system_settings(
+    const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    if (request.command_id == 3U || request.command_id == 4U) {
+        const IpcBufferDescriptor* output = find_receive_buffer(request);
+        if (output == nullptr || output->size < 0x100U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        std::vector<std::uint8_t> firmware(0x100U, 0U);
+        firmware[0] = 18U;
+        firmware[1] = 1U;
+        firmware[2] = 0U;
+        const auto put_string = [&firmware](std::size_t offset,
+                                            std::size_t capacity,
+                                            const std::string& value) {
+            const std::size_t count = std::min(capacity - 1U, value.size());
+            std::copy_n(value.begin(), count,
+                        firmware.begin() + static_cast<std::ptrdiff_t>(offset));
+        };
+        put_string(0x04U, 0x20U, "NX");
+        put_string(0x24U, 0x40U, "HorizonLite-18.1.0");
+        put_string(0x64U, 0x18U, "18.1.0");
+        put_string(0x7CU, 0x80U, "NintendoSDK Firmware for NX 18.1.0");
+        memory_.write(output->address, firmware);
+        return response;
+    }
+    if (request.command_id == 23U) {
+        append_le32(response.data, 1U);
+        return response;
+    }
+    if (request.command_id == 77U) {
+        const IpcBufferDescriptor* output = find_receive_buffer(request);
+        if (output == nullptr || output->size < 9U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const std::vector<std::uint8_t> nickname{
+            'S','w','i','t','c','h','H','L','E',0U
+        };
+        memory_.write(output->address, nickname);
+        return response;
+    }
+    response.result = kInvalidCommand;
+    return response;
+}
+
+CmifResponse HorizonKernel::dispatch_settings(const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    if (request.command_id == 0U) {
+        append_le64(response.data, 0x00000053552D6E65ULL);
+        return response;
+    }
+    if (request.command_id == 4U) {
+        append_le32(response.data, 1U);
+        return response;
+    }
+    response.result = kInvalidCommand;
+    return response;
+}
+
+std::filesystem::path HorizonKernel::resolve_save_path(
+    const std::filesystem::path& root, const std::string& guest_path) const {
+    if (guest_path.empty() || guest_path.size() > 0x400U)
+        throw std::invalid_argument("save-data path is empty or too long");
+    std::string normalized = guest_path;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    std::filesystem::path relative(normalized);
+    relative = relative.relative_path();
+    for (const auto& component : relative) {
+        if (component == ".." || component == "." || component.empty())
+            throw std::invalid_argument("save-data path traversal rejected");
+    }
+    const std::filesystem::path canonical_root =
+        std::filesystem::weakly_canonical(root);
+    const std::filesystem::path candidate =
+        std::filesystem::weakly_canonical(canonical_root / relative);
+    auto root_it = canonical_root.begin();
+    auto candidate_it = candidate.begin();
+    for (; root_it != canonical_root.end(); ++root_it, ++candidate_it) {
+        if (candidate_it == candidate.end() || *candidate_it != *root_it)
+            throw std::invalid_argument("save-data path escapes its sandbox");
+    }
+    return candidate;
+}
+
+CmifResponse HorizonKernel::dispatch_file_system(
+    const std::shared_ptr<KFileSystem>& file_system,
+    const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    const auto read_path = [this, &request]() {
+        const IpcBufferDescriptor* descriptor = nullptr;
+        if (!request.pointer_buffers.empty())
+            descriptor = &request.pointer_buffers.front();
+        else if (!request.send_buffers.empty())
+            descriptor = &request.send_buffers.front();
+        else if (!request.auto_send_buffers.empty())
+            descriptor = &request.auto_send_buffers.front();
+        if (descriptor == nullptr || descriptor->size == 0U ||
+            descriptor->size > 0x400U)
+            throw std::invalid_argument("filesystem path descriptor is invalid");
+        const auto bytes = memory_.view(descriptor->address,
+            static_cast<std::size_t>(descriptor->size), Permission::Read);
+        return trim_string(bytes);
+    };
+
+    try {
+        if (request.command_id == 0U) {
+            if (request.data.size() < 8U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const auto target = resolve_save_path(file_system->root, read_path());
+            if (std::filesystem::exists(target)) {
+                response.result = 0x202U;
+                return response;
+            }
+            std::ofstream output(target, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            output.close();
+            const std::uint64_t initial_size = read_le64(request.data, 0U);
+            if (initial_size != 0U)
+                std::filesystem::resize_file(target, initial_size);
+            return response;
+        }
+        if (request.command_id == 1U) {
+            const auto target = resolve_save_path(file_system->root, read_path());
+            if (!std::filesystem::remove(target)) response.result = 0x202U;
+            return response;
+        }
+        if (request.command_id == 2U) {
+            const auto target = resolve_save_path(file_system->root, read_path());
+            std::filesystem::create_directories(target);
+            return response;
+        }
+        if (request.command_id == 7U) {
+            const auto target = resolve_save_path(file_system->root, read_path());
+            if (!std::filesystem::exists(target)) {
+                response.result = 0x202U;
+                return response;
+            }
+            append_le32(response.data,
+                std::filesystem::is_directory(target) ? 0U : 1U);
+            return response;
+        }
+        if (request.command_id == 8U) {
+            if (request.data.size() < 4U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::uint32_t mode = read_le32(request.data, 0U);
+            if ((mode & 7U) == 0U || (mode & ~7U) != 0U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const auto target = resolve_save_path(file_system->root, read_path());
+            if (!std::filesystem::is_regular_file(target)) {
+                response.result = 0x202U;
+                return response;
+            }
+            auto file = std::make_shared<KFile>(target, mode);
+            const Handle handle = handles_.insert(file);
+            file_system->open_files.emplace_back(file);
+            response.handle = handle;
+            response.move_handle = true;
+            return response;
+        }
+        if (request.command_id == 10U) {
+            for (auto iterator = file_system->open_files.begin();
+                 iterator != file_system->open_files.end();) {
+                if (auto file = iterator->lock()) {
+                    if (file->stream.is_open()) {
+                        file->stream.flush();
+                        if (!file->stream) {
+                            response.result = kInvalidArgument;
+                            return response;
+                        }
+                    }
+                    ++iterator;
+                } else {
+                    iterator = file_system->open_files.erase(iterator);
+                }
+            }
+            return response;
+        }
+    } catch (const std::filesystem::filesystem_error& error) {
+        response.result = error.code() == std::errc::no_such_file_or_directory
+            ? 0x202U : kInvalidArgument;
+        return response;
+    } catch (const std::exception&) {
+        response.result = kInvalidArgument;
+        return response;
+    }
+    response.result = kInvalidCommand;
+    return response;
+}
+
+CmifResponse HorizonKernel::dispatch_file(
+    const std::shared_ptr<KFile>& file, const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    try {
+        if (!file->stream.is_open()) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        if (request.command_id == 0U) {
+            if (request.data.size() < 16U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::uint64_t offset = read_le64(request.data, 0U);
+            const std::uint64_t requested = read_le64(request.data, 8U);
+            const IpcBufferDescriptor* output = find_receive_buffer(request);
+            if ((file->open_mode & 1U) == 0U || output == nullptr ||
+                requested > output->size ||
+                requested > std::numeric_limits<std::size_t>::max()) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            file->stream.clear();
+            file->stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+            std::vector<std::uint8_t> data(static_cast<std::size_t>(requested));
+            file->stream.read(reinterpret_cast<char*>(data.data()),
+                              static_cast<std::streamsize>(data.size()));
+            const std::size_t count = static_cast<std::size_t>(file->stream.gcount());
+            data.resize(count);
+            memory_.write(output->address, data);
+            append_le64(response.data, count);
+            return response;
+        }
+        if (request.command_id == 1U) {
+            if (request.data.size() < 16U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::uint64_t offset = read_le64(request.data, 0U);
+            const std::uint64_t requested = read_le64(request.data, 8U);
+            const IpcBufferDescriptor* source = find_send_buffer(request, false);
+            if ((file->open_mode & 2U) == 0U || source == nullptr ||
+                requested > source->size ||
+                requested > std::numeric_limits<std::size_t>::max()) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const auto bytes = memory_.view(source->address,
+                static_cast<std::size_t>(requested), Permission::Read);
+            file->stream.clear();
+            file->stream.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
+            file->stream.write(reinterpret_cast<const char*>(bytes.data()),
+                               static_cast<std::streamsize>(bytes.size()));
+            file->stream.flush();
+            if (!file->stream) response.result = kInvalidArgument;
+            return response;
+        }
+        if (request.command_id == 2U) {
+            file->stream.flush();
+            if (!file->stream) response.result = kInvalidArgument;
+            return response;
+        }
+        if (request.command_id == 3U) {
+            if (request.data.size() < 8U || (file->open_mode & 2U) == 0U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::uint64_t size = read_le64(request.data, 0U);
+            file->stream.flush();
+            file->stream.close();
+            std::filesystem::resize_file(file->path, size);
+            std::ios::openmode flags = std::ios::binary;
+            if ((file->open_mode & 1U) != 0U) flags |= std::ios::in;
+            if ((file->open_mode & 2U) != 0U) flags |= std::ios::out;
+            file->stream.open(file->path, flags);
+            if (!file->stream) response.result = kInvalidArgument;
+            return response;
+        }
+        if (request.command_id == 4U) {
+            append_le64(response.data, std::filesystem::file_size(file->path));
+            return response;
+        }
+    } catch (const std::filesystem::filesystem_error& error) {
+        response.result = error.code() == std::errc::no_such_file_or_directory
+            ? 0x202U : kInvalidArgument;
+    } catch (const std::exception&) {
+        response.result = kInvalidArgument;
+    }
+    if (request.command_id > 4U) response.result = kInvalidCommand;
+    return response;
+}
+
 CmifResponse HorizonKernel::dispatch_storage(
     const KStorage& storage, const CmifRequest& request) {
     CmifResponse response;
@@ -515,7 +935,8 @@ CmifResponse HorizonKernel::dispatch_cmif(
             }
             if (service_name != "hid" && service_name != "fsp-srv" &&
                 service_name != "audout:u" && service_name != "nvdrv" &&
-                service_name != "vi:m") {
+                service_name != "vi:m" && service_name != "acc:u0" &&
+                service_name != "set:sys" && service_name != "set") {
                 response.result = kInvalidArgument;
                 return response;
             }
@@ -556,6 +977,15 @@ CmifResponse HorizonKernel::dispatch_cmif(
         return dispatch_audio_manager(request);
     }
 
+    if (session.service_name() == "acc:u0")
+        return dispatch_account(request);
+
+    if (session.service_name() == "set:sys")
+        return dispatch_system_settings(request);
+
+    if (session.service_name() == "set")
+        return dispatch_settings(request);
+
     if (session.service_name() == "nvdrv")
         return dispatch_nvdrv(request);
 
@@ -583,6 +1013,40 @@ CmifResponse HorizonKernel::dispatch_cmif(
         if (request.command_id == 1U) {
             if (request.data.size() < 8U)
                 response.result = kInvalidArgument;
+            return response;
+        }
+        if (request.command_id == 51U) {
+            if (request.data.size() < 0x40U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::size_t attribute_offset =
+                request.data.size() >= 0x48U ? 8U : 0U;
+            if (request.data.size() < attribute_offset + 24U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::uint64_t program_id =
+                read_le64(request.data, attribute_offset);
+            const std::uint64_t uid_low =
+                read_le64(request.data, attribute_offset + 8U);
+            const std::uint64_t uid_high =
+                read_le64(request.data, attribute_offset + 16U);
+            const auto to_hex = [](std::uint64_t value) {
+                std::ostringstream stream;
+                stream << std::hex << std::setfill('0') << std::setw(16) << value;
+                return stream.str();
+            };
+            try {
+                const std::filesystem::path root = save_data_root_ /
+                    (to_hex(uid_high) + to_hex(uid_low)) /
+                    to_hex(program_id);
+                auto file_system = std::make_shared<KFileSystem>(root);
+                response.handle = handles_.insert(file_system);
+                response.move_handle = true;
+            } catch (const std::exception&) {
+                response.result = kInvalidArgument;
+            }
             return response;
         }
         if (request.command_id == 200U) {
@@ -622,12 +1086,25 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
         } else if (object->kind() == KernelObjectKind::BinderDriver) {
             response = dispatch_hos_binder(
                 std::static_pointer_cast<KHOSBinderDriver>(object), request);
+        } else if (object->kind() == KernelObjectKind::Profile) {
+            response = dispatch_profile(request);
+        } else if (object->kind() == KernelObjectKind::FileSystem) {
+            response = dispatch_file_system(
+                std::static_pointer_cast<KFileSystem>(object), request);
+        } else if (object->kind() == KernelObjectKind::File) {
+            response = dispatch_file(
+                std::static_pointer_cast<KFile>(object), request);
         } else {
             state.x[0] = kInvalidHandle;
             return;
         }
         if (response.result != kSuccess) {
-            std::cerr << "[HorizonKernel] IPC command " << request.command_id
+            std::cerr << "[HorizonKernel] IPC ";
+            if (object->kind() == KernelObjectKind::ClientSession)
+                std::cerr << std::static_pointer_cast<KClientSession>(object)->service_name();
+            else
+                std::cerr << "object";
+            std::cerr << " command " << request.command_id
                       << " returned 0x" << std::hex << response.result
                       << std::dec << '\n';
         }
@@ -1347,42 +1824,58 @@ void HorizonKernel::svc_wait_synchronization(CpuState& state) {
         const auto raw_handles = memory_.view(
             handles_address, static_cast<std::size_t>(handle_count) * 4U,
             Permission::Read);
-        std::vector<Handle> handles;
-        handles.reserve(static_cast<std::size_t>(handle_count));
+        std::vector<Handle> wait_handles;
+        wait_handles.reserve(static_cast<std::size_t>(handle_count));
         for (std::size_t index = 0; index < handle_count; ++index)
-            handles.push_back(read_le32(raw_handles, index * 4U));
+            wait_handles.push_back(read_le32(raw_handles, index * 4U));
 
-        const auto find_signaled = [&]() -> std::optional<std::uint32_t> {
-            for (std::size_t index = 0; index < handles.size(); ++index) {
-                const auto object = handles_.get(handles[index]);
-                if (object && object->kind() == KernelObjectKind::Event &&
-                    std::static_pointer_cast<KEvent>(object)->signaled) {
+        const auto find_ready = [this, &wait_handles]()
+            -> std::optional<std::uint32_t> {
+            for (std::size_t index = 0; index < wait_handles.size(); ++index) {
+                const auto object = handles_.get(wait_handles[index]);
+                if (!object) return std::nullopt;
+                if (object->kind() == KernelObjectKind::Event &&
+                    std::static_pointer_cast<KEvent>(object)->signaled)
                     return static_cast<std::uint32_t>(index);
-                }
             }
             return std::nullopt;
         };
 
-        std::optional<std::uint32_t> ready = find_signaled();
-        for (unsigned attempt = 0U; !ready.has_value() && attempt < 120U; ++attempt) {
-            update_audio_events();
-            ready = find_signaled();
-            if (!ready.has_value()) SDL_Delay(1U);
+        const auto ready = find_ready();
+        if (ready.has_value()) {
+            state.x[0] = kSuccess;
+            state.x[1] = *ready;
+            return;
         }
 
-        if (!ready.has_value()) {
-            for (std::size_t index = 0; index < handles.size(); ++index) {
-                const auto object = handles_.get(handles[index]);
-                if (object && object->kind() == KernelObjectKind::Event) {
-                    std::static_pointer_cast<KEvent>(object)->signaled = true;
-                    ready = static_cast<std::uint32_t>(index);
-                    break;
-                }
+        if (active_thread_) {
+            const std::int64_t timeout_ns =
+                static_cast<std::int64_t>(state.x[3]);
+            if (timeout_ns == 0) {
+                state.x[0] = 0xEA01U;
+                state.x[1] = 0U;
+                return;
             }
+            active_thread_->waiting_handles = std::move(wait_handles);
+            active_thread_->has_deadline = timeout_ns > 0;
+            if (timeout_ns > 0) {
+                active_thread_->wake_deadline =
+                    std::chrono::steady_clock::now() +
+                    std::chrono::nanoseconds(timeout_ns);
+            }
+            active_thread_->status = ThreadStatus::WaitingSynchronization;
+            request_scheduler_yield();
+            return;
         }
 
-        state.x[1] = ready.value_or(0U);
-        state.x[0] = ready.has_value() ? kSuccess : kInvalidHandle;
+        std::optional<std::uint32_t> legacy_ready;
+        for (unsigned attempt = 0U; !legacy_ready.has_value() && attempt < 120U; ++attempt) {
+            update_audio_events();
+            legacy_ready = find_ready();
+            if (!legacy_ready.has_value()) SDL_Delay(1U);
+        }
+        state.x[0] = legacy_ready.has_value() ? kSuccess : 0xEA01U;
+        state.x[1] = legacy_ready.value_or(0U);
     } catch (const std::exception&) {
         state.x[0] = kInvalidArgument;
         state.x[1] = 0U;
@@ -1439,6 +1932,330 @@ void HorizonKernel::svc_unmap_shared_memory(CpuState& state) {
 void HorizonKernel::svc_close_handle(CpuState& state) {
     state.x[0] = handles_.close(static_cast<Handle>(state.x[0]))
         ? kSuccess : kInvalidHandle;
+}
+
+void HorizonKernel::initialize_scheduler(const CpuState& initial_context) {
+    if (scheduler_initialized_) return;
+    auto main = std::make_shared<KThread>(0U);
+    main->context = initial_context;
+    main->context.exclusive_monitor.clear();
+    main->status = ThreadStatus::Runnable;
+    main->priority = 0x2CU;
+    main->processor_id = -1;
+    main->handle = handles_.insert(main);
+    threads_.push_back(main);
+    main_thread_ = std::move(main);
+    active_thread_.reset();
+    scheduler_cursor_ = 0U;
+    next_thread_index_ = 1U;
+    scheduler_initialized_ = true;
+    scheduler_yield_requested_ = false;
+}
+
+std::size_t HorizonKernel::run_scheduler(
+    Arm64Cpu& cpu, std::size_t max_instructions,
+    std::uint64_t stop_pc, std::size_t time_slice) {
+    if (!scheduler_initialized_) initialize_scheduler(cpu.state());
+    if (time_slice == 0U) time_slice = 750U;
+
+    std::size_t executed_total = 0U;
+    std::size_t idle_rounds = 0U;
+    while (running_ && executed_total < max_instructions) {
+        update_thread_waiters();
+        update_audio_events();
+
+        std::shared_ptr<KThread> thread = next_runnable_thread();
+        if (!thread) {
+            const bool has_blocked_threads = std::any_of(
+                threads_.begin(), threads_.end(),
+                [](const std::shared_ptr<KThread>& item) {
+                    return item->status == ThreadStatus::Sleeping ||
+                           item->status == ThreadStatus::WaitingSynchronization ||
+                           item->status == ThreadStatus::WaitingLock;
+                });
+            if (!has_blocked_threads || idle_rounds++ >= 100U) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        idle_rounds = 0U;
+
+        active_thread_ = thread;
+        scheduler_yield_requested_ = false;
+        thread->context.exclusive_monitor.clear();
+        cpu.state() = thread->context;
+        const std::size_t slice = std::min(
+            time_slice, max_instructions - executed_total);
+        const std::size_t executed = cpu.run(slice, stop_pc);
+        executed_total += executed;
+        thread->context = cpu.state();
+        thread->context.exclusive_monitor.clear();
+
+        if (thread->status == ThreadStatus::Runnable &&
+            thread->context.pc == stop_pc) {
+            thread->status = ThreadStatus::Terminated;
+        }
+        active_thread_.reset();
+        scheduler_yield_requested_ = false;
+
+        if (executed == 0U && thread->status == ThreadStatus::Runnable)
+            break;
+    }
+    return executed_total;
+}
+
+std::shared_ptr<KThread> HorizonKernel::find_thread(Handle handle) const noexcept {
+    const auto found = std::find_if(
+        threads_.begin(), threads_.end(),
+        [handle](const std::shared_ptr<KThread>& thread) {
+            return thread->handle == handle &&
+                   thread->status != ThreadStatus::Terminated;
+        });
+    return found == threads_.end() ? nullptr : *found;
+}
+
+std::shared_ptr<KThread> HorizonKernel::next_runnable_thread() {
+    if (threads_.empty()) return nullptr;
+    for (std::size_t attempt = 0U; attempt < threads_.size(); ++attempt) {
+        const std::size_t index =
+            (scheduler_cursor_ + attempt) % threads_.size();
+        const auto& thread = threads_[index];
+        if (thread->status == ThreadStatus::Runnable) {
+            scheduler_cursor_ = (index + 1U) % threads_.size();
+            return thread;
+        }
+    }
+    return nullptr;
+}
+
+bool HorizonKernel::any_runnable_thread() const noexcept {
+    return std::any_of(threads_.begin(), threads_.end(),
+        [](const std::shared_ptr<KThread>& thread) {
+            return thread->status == ThreadStatus::Runnable;
+        });
+}
+
+void HorizonKernel::request_scheduler_yield() noexcept {
+    scheduler_yield_requested_ = true;
+}
+
+void HorizonKernel::reset_all_exclusive_monitors() noexcept {
+    for (const auto& thread : threads_)
+        thread->context.exclusive_monitor.clear();
+    if (active_thread_)
+        active_thread_->context.exclusive_monitor.clear();
+}
+
+void HorizonKernel::update_thread_waiters() {
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& thread : threads_) {
+        if (thread->status == ThreadStatus::Sleeping) {
+            if (!thread->has_deadline || now >= thread->wake_deadline) {
+                thread->status = ThreadStatus::Runnable;
+                thread->has_deadline = false;
+                thread->context.x[0] = kSuccess;
+            }
+            continue;
+        }
+        if (thread->status != ThreadStatus::WaitingSynchronization) continue;
+
+        bool woke = false;
+        for (std::size_t index = 0U; index < thread->waiting_handles.size(); ++index) {
+            const auto object = handles_.get(thread->waiting_handles[index]);
+            if (!object) {
+                thread->context.x[0] = kInvalidHandle;
+                thread->context.x[1] = 0U;
+                woke = true;
+                break;
+            }
+            if (object->kind() == KernelObjectKind::Event &&
+                std::static_pointer_cast<KEvent>(object)->signaled) {
+                thread->context.x[0] = kSuccess;
+                thread->context.x[1] = index;
+                woke = true;
+                break;
+            }
+        }
+        if (!woke && thread->has_deadline && now >= thread->wake_deadline) {
+            thread->context.x[0] = 0xEA01U;
+            thread->context.x[1] = 0U;
+            woke = true;
+        }
+        if (woke) {
+            thread->waiting_handles.clear();
+            thread->has_deadline = false;
+            thread->status = ThreadStatus::Runnable;
+        }
+    }
+}
+
+void HorizonKernel::svc_create_thread(CpuState& state) {
+    const std::uint64_t entry_pc = state.x[1];
+    const std::uint64_t argument = state.x[2];
+    const std::uint64_t stack_top = state.x[3];
+    const std::int32_t priority = static_cast<std::int32_t>(state.x[4]);
+    const std::int32_t processor_id = static_cast<std::int32_t>(state.x[5]);
+    if (!scheduler_initialized_ || entry_pc == 0U ||
+        stack_top < 16U || (stack_top & 0xFU) != 0U ||
+        priority < 0 || priority > 0x3F ||
+        (processor_id < -1 || processor_id > 3) ||
+        next_thread_index_ >= 0x10000U) {
+        state.x[0] = kInvalidArgument;
+        state.x[1] = 0U;
+        return;
+    }
+
+    try {
+        (void)memory_.view(entry_pc, 4U, Permission::Execute);
+        (void)memory_.view(stack_top - 16U, 16U, Permission::Write);
+        const std::uint64_t tls_address =
+            0x10000000ULL + static_cast<std::uint64_t>(next_thread_index_) * 0x1000ULL;
+        memory_.map_zeroed(tls_address, 0x1000U,
+                           Permission::Read | Permission::Write);
+
+        auto thread = std::make_shared<KThread>(next_thread_index_++);
+        thread->context = CpuState{};
+        thread->context.x[0] = argument;
+        thread->context.sp = stack_top;
+        thread->context.pc = entry_pc;
+        thread->context.tpidrro_el0 = tls_address;
+        thread->context.exclusive_monitor.clear();
+        thread->status = ThreadStatus::Suspended;
+        thread->priority = priority;
+        thread->processor_id = processor_id;
+        thread->handle = handles_.insert(thread);
+        threads_.push_back(thread);
+        state.x[0] = kSuccess;
+        state.x[1] = thread->handle;
+    } catch (const std::exception&) {
+        state.x[0] = kInvalidArgument;
+        state.x[1] = 0U;
+    }
+}
+
+void HorizonKernel::svc_start_thread(CpuState& state) {
+    const Handle handle = static_cast<Handle>(state.x[0]);
+    const auto thread = find_thread(handle);
+    if (!thread || thread->status != ThreadStatus::Suspended) {
+        state.x[0] = kInvalidHandle;
+        return;
+    }
+    thread->status = ThreadStatus::Runnable;
+    state.x[0] = kSuccess;
+}
+
+void HorizonKernel::svc_exit_thread(CpuState& state) noexcept {
+    if (!active_thread_) {
+        state.x[0] = kInvalidHandle;
+        return;
+    }
+    active_thread_->status = ThreadStatus::Terminated;
+    active_thread_->waiting_handles.clear();
+    active_thread_->has_deadline = false;
+    state.x[0] = kSuccess;
+    state.exclusive_monitor.clear();
+    request_scheduler_yield();
+}
+
+void HorizonKernel::svc_sleep_thread(CpuState& state) {
+    if (!active_thread_) {
+        state.x[0] = kInvalidArgument;
+        return;
+    }
+    const std::int64_t nanoseconds =
+        static_cast<std::int64_t>(state.x[0]);
+    if (nanoseconds <= 0) {
+        state.x[0] = kSuccess;
+        request_scheduler_yield();
+        return;
+    }
+    active_thread_->status = ThreadStatus::Sleeping;
+    active_thread_->wake_deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::nanoseconds(nanoseconds);
+    active_thread_->has_deadline = true;
+    state.x[0] = kSuccess;
+    state.exclusive_monitor.clear();
+    request_scheduler_yield();
+}
+
+void HorizonKernel::svc_arbitrate_lock(CpuState& state) {
+    const Handle owner_handle = static_cast<Handle>(state.x[0]);
+    const std::uint64_t mutex_address = state.x[1];
+    const Handle requester_handle = static_cast<Handle>(state.x[2]);
+    if ((mutex_address & 3U) != 0U) {
+        state.x[0] = kInvalidArgument;
+        return;
+    }
+    try {
+        const std::uint32_t mutex_value =
+            memory_.read_u32(mutex_address, Permission::Read);
+        const std::uint32_t owner_value = mutex_value & 0x3FFFFFFFU;
+        if (owner_value != owner_handle) {
+            state.x[0] = kSuccess;
+            return;
+        }
+        const auto requester = find_thread(requester_handle);
+        if (!requester || requester->status == ThreadStatus::Terminated) {
+            state.x[0] = kInvalidHandle;
+            return;
+        }
+        requester->status = ThreadStatus::WaitingLock;
+        requester->waiting_mutex = mutex_address;
+        requester->context.exclusive_monitor.clear();
+        state.x[0] = kSuccess;
+        state.exclusive_monitor.clear();
+        if (active_thread_ == requester) request_scheduler_yield();
+    } catch (const std::exception&) {
+        state.x[0] = kInvalidArgument;
+    }
+}
+
+void HorizonKernel::svc_arbitrate_unlock(CpuState& state) {
+    const std::uint64_t mutex_address = state.x[0];
+    if ((mutex_address & 3U) != 0U) {
+        state.x[0] = kInvalidArgument;
+        return;
+    }
+    try {
+        (void)memory_.read_u32(mutex_address, Permission::Read);
+        std::shared_ptr<KThread> next_owner;
+        std::size_t waiting_count = 0U;
+        for (const auto& thread : threads_) {
+            if (thread->status == ThreadStatus::WaitingLock &&
+                thread->waiting_mutex == mutex_address) {
+                ++waiting_count;
+                if (!next_owner) next_owner = thread;
+            }
+        }
+        if (!next_owner) {
+            memory_.write_u32(mutex_address, 0U);
+        } else {
+            next_owner->status = ThreadStatus::Runnable;
+            next_owner->waiting_mutex = 0U;
+            const bool has_more_waiters = waiting_count > 1U;
+            const std::uint32_t new_value = next_owner->handle |
+                (has_more_waiters ? 0x40000000U : 0U);
+            memory_.write_u32(mutex_address, new_value);
+        }
+        reset_all_exclusive_monitors();
+        state.exclusive_monitor.clear();
+        state.x[0] = kSuccess;
+    } catch (const std::exception&) {
+        state.x[0] = kInvalidArgument;
+    }
+}
+
+std::size_t HorizonKernel::scheduled_thread_count() const noexcept {
+    return threads_.size();
+}
+
+Handle HorizonKernel::current_thread_handle() const noexcept {
+    return active_thread_ ? active_thread_->handle :
+        (main_thread_ ? main_thread_->handle : 0U);
+}
+
+bool HorizonKernel::yield_requested() const noexcept {
+    return scheduler_yield_requested_;
 }
 
 void HorizonKernel::update_hid_input(std::uint64_t buttons) {
@@ -1501,11 +2318,17 @@ void SvcHandler::dispatch(std::uint16_t immediate, CpuState& state) {
     switch (immediate) {
     case 0x01: kernel_.svc_set_heap_size(state); break;
     case 0x07: kernel_.svc_exit_process(state); break;
+    case 0x08: kernel_.svc_create_thread(state); break;
     case 0x09: kernel_.svc_close_handle(state); break;
+    case 0x0A: kernel_.svc_start_thread(state); break;
+    case 0x0B: kernel_.svc_exit_thread(state); break;
+    case 0x0C: kernel_.svc_sleep_thread(state); break;
     case 0x14: kernel_.svc_map_shared_memory(state); break;
     case 0x15: kernel_.svc_unmap_shared_memory(state); break;
     case 0x17: kernel_.svc_reset_signal(state); break;
     case 0x18: kernel_.svc_wait_synchronization(state); break;
+    case 0x1A: kernel_.svc_arbitrate_lock(state); break;
+    case 0x1B: kernel_.svc_arbitrate_unlock(state); break;
     case 0x1F: kernel_.svc_connect_to_named_port(state); break;
     case 0x21: kernel_.svc_send_sync_request(state); break;
     case 0x26: kernel_.svc_break(state); break;
@@ -1519,5 +2342,8 @@ void SvcHandler::dispatch(std::uint16_t immediate, CpuState& state) {
 }
 
 bool SvcHandler::running() const noexcept { return kernel_.running(); }
+bool SvcHandler::yield_requested() const noexcept {
+    return kernel_.yield_requested();
+}
 
 } // namespace horizon

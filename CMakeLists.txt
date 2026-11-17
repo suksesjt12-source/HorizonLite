@@ -64,6 +64,31 @@ else()
     target_compile_options(horizonlite_cpu_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_executable(horizonlite_thread_atomic_fpu_test
+    tests/thread_atomic_fpu_test.cpp
+    src/memory.cpp
+    src/cpu.cpp
+    src/kernel.cpp
+    src/audio.cpp
+    src/display.cpp
+)
+target_include_directories(horizonlite_thread_atomic_fpu_test PRIVATE include)
+target_compile_features(horizonlite_thread_atomic_fpu_test PRIVATE cxx_std_20)
+if(TARGET SDL2::SDL2)
+    target_link_libraries(horizonlite_thread_atomic_fpu_test PRIVATE SDL2::SDL2)
+elseif(TARGET SDL2::SDL2-static)
+    target_link_libraries(horizonlite_thread_atomic_fpu_test PRIVATE SDL2::SDL2-static)
+elseif(TARGET PkgConfig::SDL2)
+    target_link_libraries(horizonlite_thread_atomic_fpu_test PRIVATE PkgConfig::SDL2)
+else()
+    message(FATAL_ERROR "SDL2 target is required by horizonlite_thread_atomic_fpu_test")
+endif()
+if(MSVC)
+    target_compile_options(horizonlite_thread_atomic_fpu_test PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(horizonlite_thread_atomic_fpu_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(horizonlite_romfs_test
     tests/romfs_asset_test.cpp
     src/romfs.cpp
@@ -101,5 +126,8 @@ endif()
 enable_testing()
 add_test(NAME horizonlite_headless_self_test COMMAND horizonlite --headless)
 add_test(NAME horizonlite_cpu_memory_test COMMAND horizonlite_cpu_test)
+add_test(NAME horizonlite_thread_atomic_fpu_test COMMAND horizonlite_thread_atomic_fpu_test)
 add_test(NAME horizonlite_romfs_asset_test COMMAND horizonlite_romfs_test)
 add_test(NAME horizonlite_display_gpu_test COMMAND horizonlite_display_gpu_test)
+add_test(NAME horizonlite_save_data_relaunch_test COMMAND horizonlite --headless)
+set_tests_properties(horizonlite_save_data_relaunch_test PROPERTIES DEPENDS horizonlite_headless_self_test)
