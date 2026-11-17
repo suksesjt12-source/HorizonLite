@@ -303,7 +303,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.add_imm(13U, 13U, 4U);
     a.subs_imm(14U, 14U, 1U);
     a.bcond(1U, "draw_column");
-    a.add_imm(11U, 11U, 1U, true);
+    a.add_imm(11U, 11U, 4096U, true);
     a.add_imm(11U, 11U, 896U);
     a.subs_imm(12U, 12U, 1U);
     a.bcond(1U, "draw_row");
