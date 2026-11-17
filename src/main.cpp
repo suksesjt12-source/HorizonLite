@@ -902,27 +902,28 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.branch_link("draw_solid_sprite_area");
 
     a.ldr_x(0U, 15U, 0U);
-    a.and_imm(1U, 0U, 52U, 0U);
+    a.mov_reg(26U, 0U);
+    a.and_imm(1U, 26U, 52U, 0U);
     a.cbz(1U, "not_left");
     a.sub_imm(19U, 19U, 2U);
     a.bind("not_left");
 
-    a.and_imm(1U, 0U, 51U, 0U);
+    a.and_imm(1U, 26U, 51U, 0U);
     a.cbz(1U, "not_up");
     a.sub_imm(18U, 18U, 2U);
     a.bind("not_up");
 
-    a.and_imm(1U, 0U, 50U, 0U);
+    a.and_imm(1U, 26U, 50U, 0U);
     a.cbz(1U, "not_right");
     a.add_imm(19U, 19U, 2U);
     a.bind("not_right");
 
-    a.and_imm(1U, 0U, 49U, 0U);
+    a.and_imm(1U, 26U, 49U, 0U);
     a.cbz(1U, "not_down");
     a.add_imm(18U, 18U, 2U);
     a.bind("not_down");
 
-    a.and_imm(1U, 0U, 0U, 0U);
+    a.and_imm(1U, 26U, 0U, 0U);
     a.cbz(1U, "audio_button_released");
     a.cbnz(24U, "audio_button_done");
     emit_cmif_request(a, 7U, IpcDescriptorKind::AutoSend,
@@ -956,7 +957,7 @@ std::vector<std::uint32_t> build_self_test_program() {
     a.movz(18U, 0U);
     a.bind("y_ready");
 
-    a.and_imm(1U, 0U, 62U, 0U);
+    a.and_imm(1U, 26U, 62U, 0U);
     a.cbz(1U, "persistent_save_done");
     a.mov64(2U, kStage6ScratchAddress);
     a.str_w(19U, 2U, 0x420U);
