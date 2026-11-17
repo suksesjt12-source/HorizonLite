@@ -1,4 +1,5 @@
 #include "horizon/kernel.hpp"
+#include "horizon/display.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -73,6 +74,50 @@ std::string trim_string(std::span<const std::uint8_t> bytes) {
     return std::string(bytes.begin(), end);
 }
 
+std::size_t parcel_payload_offset(std::span<const std::uint8_t> parcel) {
+    if (parcel.size() >= 8U && read_le32(parcel, 0U) == 0x43524150U)
+        return 8U;
+    if (parcel.size() >= 12U && read_le32(parcel, 0U) == 0U &&
+        read_le32(parcel, 4U) == 0U) {
+        const std::uint32_t length = read_le32(parcel, 8U);
+        if (length <= 256U) {
+            const std::size_t end = 12U +
+                (static_cast<std::size_t>(length) + 1U) * 2U;
+            if (end <= parcel.size()) return align_up(end, 4U);
+        }
+    }
+    if (parcel.size() >= 4U) {
+        const std::uint32_t length = read_le32(parcel, 0U);
+        if (length <= 256U) {
+            const std::size_t end = 4U +
+                (static_cast<std::size_t>(length) + 1U) * 2U;
+            if (end <= parcel.size()) return align_up(end, 4U);
+        }
+    }
+    return 0U;
+}
+
+std::uint32_t parcel_u32(std::span<const std::uint8_t> parcel,
+                         std::size_t offset) {
+    return read_le32(parcel, offset);
+}
+
+std::vector<std::uint8_t> make_native_window_parcel() {
+    std::vector<std::uint8_t> parcel;
+    append_le32(parcel, 0x43524150U);
+    append_le32(parcel, 1U);
+    append_le32(parcel, 1U);
+    append_le32(parcel, 7U);
+    for (const char ch : std::string("dispdrv")) {
+        parcel.push_back(static_cast<std::uint8_t>(ch));
+        parcel.push_back(0U);
+    }
+    parcel.push_back(0U);
+    parcel.push_back(0U);
+    while ((parcel.size() & 3U) != 0U) parcel.push_back(0U);
+    return parcel;
+}
+
 IpcBufferDescriptor decode_map_descriptor(
     std::span<const std::uint8_t> bytes, std::size_t offset) {
     const std::uint32_t size_low = read_le32(bytes, offset);
@@ -123,6 +168,17 @@ KAudioOut::KAudioOut(SdlAudioOutput& output)
       buffer_event(std::make_shared<KEvent>()),
       started(true) {
     device.pause(false);
+}
+
+KDisplayLayer::KDisplayLayer()
+    : KObject(KernelObjectKind::DisplayLayer),
+      presented_rgba(1280U * 720U * 4U, 0U),
+      vsync_event(std::make_shared<KEvent>()),
+      release_event(std::make_shared<KEvent>()) {}
+
+KHOSBinderDriver::KHOSBinderDriver(std::shared_ptr<KDisplayLayer> display_layer)
+    : KObject(KernelObjectKind::BinderDriver), layer(std::move(display_layer)) {
+    if (!layer) throw std::invalid_argument("Binder driver requires a display layer");
 }
 
 KStorage::KStorage(std::shared_ptr<const std::vector<std::uint8_t>> romfs)
@@ -266,7 +322,8 @@ HorizonKernel::HorizonKernel(AddressSpace& memory,
     : memory_(memory),
       hid_shared_memory_(std::make_shared<KSharedMemory>(kHidSharedMemorySize)),
       romfs_(std::make_shared<const std::vector<std::uint8_t>>(std::move(romfs))),
-      audio_device_(audio) {
+      audio_device_(audio),
+      display_layer_(std::make_shared<KDisplayLayer>()) {
     auto sm_port = std::make_shared<KPort>("sm:");
     (void)handles_.insert(sm_port);
     const std::string sm_port_name = sm_port->name();
@@ -457,7 +514,8 @@ CmifResponse HorizonKernel::dispatch_cmif(
                 return response;
             }
             if (service_name != "hid" && service_name != "fsp-srv" &&
-                service_name != "audout:u") {
+                service_name != "audout:u" && service_name != "nvdrv" &&
+                service_name != "vi:m") {
                 response.result = kInvalidArgument;
                 return response;
             }
@@ -497,6 +555,29 @@ CmifResponse HorizonKernel::dispatch_cmif(
     if (session.service_name() == "audout:u") {
         return dispatch_audio_manager(request);
     }
+
+    if (session.service_name() == "nvdrv")
+        return dispatch_nvdrv(request);
+
+    if (session.service_name() == "vi:m") {
+        if (request.command_id == 0U) {
+            response.handle = handles_.insert(
+                std::make_shared<KClientSession>("application_root"));
+            response.move_handle = true;
+            return response;
+        }
+        response.result = kInvalidCommand;
+        return response;
+    }
+
+    if (session.service_name() == "application_root")
+        return dispatch_display_root(request);
+
+    if (session.service_name() == "application_display")
+        return dispatch_display_service(request);
+
+    if (session.service_name() == "display_stub")
+        return response;
 
     if (session.service_name() == "fsp-srv") {
         if (request.command_id == 1U) {
@@ -538,6 +619,9 @@ void HorizonKernel::svc_send_sync_request(CpuState& state) {
         } else if (object->kind() == KernelObjectKind::AudioOut) {
             response = dispatch_audio_out(
                 std::static_pointer_cast<KAudioOut>(object), request);
+        } else if (object->kind() == KernelObjectKind::BinderDriver) {
+            response = dispatch_hos_binder(
+                std::static_pointer_cast<KHOSBinderDriver>(object), request);
         } else {
             state.x[0] = kInvalidHandle;
             return;
@@ -576,6 +660,470 @@ const IpcBufferDescriptor* HorizonKernel::find_receive_buffer(
         return &request.auto_receive_buffers.front();
     if (!request.exchange_buffers.empty()) return &request.exchange_buffers.front();
     return nullptr;
+}
+
+CmifResponse HorizonKernel::dispatch_nvdrv(
+    const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+
+    if (request.command_id == 0U) {
+        const IpcBufferDescriptor* source = find_send_buffer(request);
+        if (source == nullptr || source->size == 0U || source->size > 0x100U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        try {
+            const auto path_bytes = memory_.view(
+                source->address, static_cast<std::size_t>(source->size),
+                Permission::Read);
+            const std::string path = trim_string(path_bytes);
+            if (path != "/dev/nvmap" && path != "/dev/nvhost-ctrl" &&
+                path != "/dev/nvhost-gpu") {
+                append_le32(response.data, 0xFFFFFFFFU);
+                append_le32(response.data, kInvalidArgument);
+                return response;
+            }
+            if (next_nv_fd_ <= 0 || next_nv_fd_ == std::numeric_limits<std::int32_t>::max()) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::int32_t fd = next_nv_fd_++;
+            nv_devices_.emplace(fd, path);
+            append_le32(response.data, static_cast<std::uint32_t>(fd));
+            append_le32(response.data, kSuccess);
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+        }
+        return response;
+    }
+
+    if (request.command_id == 3U || request.command_id == 8U) {
+        append_le32(response.data, kSuccess);
+        return response;
+    }
+
+    if (request.command_id != 1U && request.command_id != 11U) {
+        response.result = kInvalidCommand;
+        return response;
+    }
+    if (request.data.size() < 8U) {
+        response.result = kInvalidArgument;
+        return response;
+    }
+
+    const std::int32_t fd = static_cast<std::int32_t>(read_le32(request.data, 0U));
+    const std::uint32_t ioctl_code = read_le32(request.data, 4U);
+    const auto device = nv_devices_.find(fd);
+    if (device == nv_devices_.end() || device->second != "/dev/nvmap") {
+        append_le32(response.data, kInvalidArgument);
+        return response;
+    }
+
+    const IpcBufferDescriptor* input = find_send_buffer(request);
+    const IpcBufferDescriptor* output = find_receive_buffer(request);
+    if (input == nullptr) input = find_receive_buffer(request);
+    if (output == nullptr) output = input;
+    if (input == nullptr || input->size == 0U ||
+        input->size > 0x1000U || output == nullptr) {
+        append_le32(response.data, kInvalidArgument);
+        return response;
+    }
+
+    try {
+        const auto input_bytes = memory_.view(
+            input->address, static_cast<std::size_t>(input->size),
+            Permission::Read);
+        std::vector<std::uint8_t> out(
+            input_bytes.begin(), input_bytes.end());
+        std::uint32_t error = kSuccess;
+
+        constexpr std::uint32_t kNvMapCreate = 0xC0080101U;
+        constexpr std::uint32_t kNvMapFromId = 0xC0080103U;
+        constexpr std::uint32_t kNvMapAlloc = 0xC0200104U;
+        constexpr std::uint32_t kNvMapParam = 0xC0080109U;
+        constexpr std::uint32_t kNvMapGetId = 0xC008010EU;
+
+        if (ioctl_code == kNvMapCreate) {
+            if (input_bytes.size() < 4U) {
+                error = kInvalidArgument;
+            } else {
+                const std::uint32_t requested_size = read_le32(input_bytes, 0U);
+                if (requested_size == 0U || requested_size > 0x20000000U ||
+                    next_nvmap_handle_ == 0U || next_nvmap_id_ == 0U) {
+                    error = kInvalidArgument;
+                } else {
+                    NvMapBuffer buffer;
+                    buffer.handle = next_nvmap_handle_++;
+                    buffer.id = next_nvmap_id_++;
+                    buffer.size = requested_size;
+                    nvmap_buffers_.emplace(buffer.handle, buffer);
+                    if (out.size() < 8U) out.resize(8U, 0U);
+                    write_le32(out, 0U, requested_size);
+                    write_le32(out, 4U, buffer.handle);
+                }
+            }
+        } else if (ioctl_code == kNvMapAlloc) {
+            if (input_bytes.size() < 24U) {
+                error = kInvalidArgument;
+            } else {
+                const std::uint32_t handle = read_le32(input_bytes, 0U);
+                const auto found = nvmap_buffers_.find(handle);
+                const std::uint32_t heap_mask = read_le32(input_bytes, 4U);
+                const std::uint32_t flags = read_le32(input_bytes, 8U);
+                const std::uint32_t alignment = read_le32(input_bytes, 12U);
+                const std::uint64_t guest_address =
+                    read_le64(input_bytes, input_bytes.size() >= 32U ? 24U : 16U);
+                const std::uint64_t actual_alignment = alignment == 0U
+                    ? 0x1000U : alignment;
+                if (found == nvmap_buffers_.end() || guest_address == 0U ||
+                    actual_alignment > 0x100000U ||
+                    (actual_alignment & (actual_alignment - 1U)) != 0U ||
+                    (guest_address % actual_alignment) != 0U ||
+                    guest_address > std::numeric_limits<std::uint64_t>::max() -
+                        found->second.size) {
+                    error = kInvalidArgument;
+                } else {
+                    (void)memory_.view(guest_address,
+                        static_cast<std::size_t>(found->second.size),
+                        Permission::Read | Permission::Write);
+                    found->second.heap_mask = heap_mask;
+                    found->second.flags = flags;
+                    found->second.alignment = actual_alignment;
+                    found->second.guest_address = guest_address;
+                    found->second.allocated = true;
+                }
+            }
+        } else if (ioctl_code == kNvMapGetId) {
+            if (input_bytes.size() < 8U) {
+                error = kInvalidArgument;
+            } else {
+                const std::uint32_t handle = read_le32(input_bytes, 0U);
+                const auto found = nvmap_buffers_.find(handle);
+                if (found == nvmap_buffers_.end()) error = kInvalidArgument;
+                else {
+                    if (out.size() < 8U) out.resize(8U, 0U);
+                    write_le32(out, 0U, handle);
+                    write_le32(out, 4U, found->second.id);
+                }
+            }
+        } else if (ioctl_code == kNvMapFromId) {
+            if (input_bytes.size() < 8U) {
+                error = kInvalidArgument;
+            } else {
+                const std::uint32_t id = read_le32(input_bytes, 0U);
+                const auto found = std::find_if(
+                    nvmap_buffers_.begin(), nvmap_buffers_.end(),
+                    [id](const auto& entry) { return entry.second.id == id; });
+                if (found == nvmap_buffers_.end()) error = kInvalidArgument;
+                else {
+                    if (out.size() < 8U) out.resize(8U, 0U);
+                    write_le32(out, 0U, id);
+                    write_le32(out, 4U, found->second.handle);
+                }
+            }
+        } else if (ioctl_code == kNvMapParam) {
+            if (input_bytes.size() < 8U) {
+                error = kInvalidArgument;
+            } else {
+                const std::uint32_t handle = read_le32(input_bytes, 0U);
+                const std::uint32_t parameter = read_le32(input_bytes, 4U);
+                const auto found = nvmap_buffers_.find(handle);
+                if (found == nvmap_buffers_.end()) error = kInvalidArgument;
+                else {
+                    std::uint32_t value = 0U;
+                    if (parameter == 1U)
+                        value = static_cast<std::uint32_t>(found->second.size);
+                    else if (parameter == 2U)
+                        value = static_cast<std::uint32_t>(found->second.alignment);
+                    else if (parameter == 3U)
+                        value = found->second.flags;
+                    else
+                        error = kInvalidArgument;
+                    if (out.size() < 8U) out.resize(8U, 0U);
+                    write_le32(out, 0U, handle);
+                    write_le32(out, 4U, value);
+                }
+            }
+        } else {
+            error = kInvalidCommand;
+        }
+
+        if (error == kSuccess) {
+            if (output->size < out.size())
+                error = kInvalidArgument;
+            else
+                memory_.write(output->address, out);
+        }
+        append_le32(response.data, error);
+    } catch (const std::exception&) {
+        append_le32(response.data, kInvalidArgument);
+    }
+    return response;
+}
+
+CmifResponse HorizonKernel::dispatch_display_root(
+    const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    if (request.command_id == 0U) {
+        response.handle = handles_.insert(
+            std::make_shared<KClientSession>("application_display"));
+        response.move_handle = true;
+    } else {
+        response.result = kInvalidCommand;
+    }
+    return response;
+}
+
+CmifResponse HorizonKernel::dispatch_display_service(
+    const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+
+    if (request.command_id == 100U) {
+        response.handle = handles_.insert(
+            std::make_shared<KHOSBinderDriver>(display_layer_));
+        response.move_handle = true;
+        return response;
+    }
+    if (request.command_id == 101U || request.command_id == 102U) {
+        response.handle = handles_.insert(
+            std::make_shared<KClientSession>("display_stub"));
+        response.move_handle = true;
+        return response;
+    }
+    if (request.command_id == 1010U) {
+        const IpcBufferDescriptor* source = find_send_buffer(request);
+        if (source != nullptr) {
+            const auto name = memory_.view(
+                source->address, static_cast<std::size_t>(source->size),
+                Permission::Read);
+            if (trim_string(name) != "Default") {
+                response.result = kInvalidArgument;
+                return response;
+            }
+        }
+        append_le64(response.data, 0U);
+        return response;
+    }
+    if (request.command_id == 2020U) {
+        const IpcBufferDescriptor* source = find_send_buffer(request);
+        const IpcBufferDescriptor* destination = find_receive_buffer(request);
+        if (source == nullptr || source->size == 0U || source->size > 0x100U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        try {
+            const auto name = memory_.view(
+                source->address, static_cast<std::size_t>(source->size),
+                Permission::Read);
+            if (trim_string(name) != "Default") {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            if (request.data.size() < 16U) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            (void)read_le64(request.data, 0U);
+            (void)read_le64(request.data, 8U);
+            const auto native_window = make_native_window_parcel();
+            if (destination != nullptr) {
+                if (destination->size < native_window.size()) {
+                    response.result = kInvalidArgument;
+                    return response;
+                }
+                memory_.write(destination->address, native_window);
+                append_le64(response.data, 0U);
+            } else {
+                response.data = native_window;
+            }
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+        }
+        return response;
+    }
+    if (request.command_id == 2101U)
+        return response;
+    if (request.command_id == 5202U) {
+        response.handle = handles_.insert(display_layer_->vsync_event);
+        response.move_handle = false;
+        return response;
+    }
+
+    response.result = kInvalidCommand;
+    return response;
+}
+
+CmifResponse HorizonKernel::dispatch_hos_binder(
+    const std::shared_ptr<KHOSBinderDriver>& binder,
+    const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    if (request.command_id == 1U) return response;
+    if (request.command_id == 2U) {
+        response.handle = handles_.insert(binder->layer->release_event);
+        response.move_handle = false;
+        return response;
+    }
+    if (request.command_id != 0U && request.command_id != 3U) {
+        response.result = kInvalidCommand;
+        return response;
+    }
+    if (request.data.size() < 8U) {
+        response.result = kInvalidArgument;
+        return response;
+    }
+    const std::uint32_t binder_id = read_le32(request.data, 0U);
+    const std::uint32_t transaction = read_le32(request.data, 4U);
+    if (binder_id != 1U) {
+        response.result = kInvalidArgument;
+        return response;
+    }
+
+    std::span<const std::uint8_t> parcel;
+    const IpcBufferDescriptor* source = find_send_buffer(request);
+    if (source != nullptr) {
+        parcel = memory_.view(source->address,
+            static_cast<std::size_t>(source->size), Permission::Read);
+    } else if (request.data.size() > 8U) {
+        parcel = std::span<const std::uint8_t>(request.data).subspan(8U);
+    }
+    const std::size_t cursor = parcel_payload_offset(parcel);
+    const auto require_u32 = [&parcel, cursor](std::size_t relative) {
+        return parcel_u32(parcel, cursor + relative);
+    };
+    std::vector<std::uint8_t> reply;
+
+    if (transaction == 10U) {
+        append_le32(reply, kSuccess);
+        append_le32(reply, 1280U);
+        append_le32(reply, 720U);
+        append_le32(reply, 0U);
+        append_le32(reply, 0U);
+    } else if (transaction == 14U) {
+        if (parcel.size() < cursor + 16U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const std::uint32_t slot = require_u32(0U);
+        const std::uint32_t reference = require_u32(4U);
+        const std::uint64_t offset = read_le64(parcel, cursor + 8U);
+        if (slot >= binder->layer->slots.size()) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        auto found = nvmap_buffers_.find(reference);
+        if (found == nvmap_buffers_.end()) {
+            found = std::find_if(nvmap_buffers_.begin(), nvmap_buffers_.end(),
+                [reference](const auto& entry) {
+                    return entry.second.id == reference;
+                });
+        }
+        if (found == nvmap_buffers_.end() || !found->second.allocated ||
+            offset > found->second.size ||
+            found->second.size - offset < 1280U * 720U * 4U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        binder->layer->slots[slot] =
+            DisplayBufferSlot{found->second.handle, offset, true};
+        append_le32(reply, kSuccess);
+    } else if (transaction == 3U) {
+        std::uint32_t selected = 2U;
+        for (std::uint32_t attempt = 0U; attempt < 2U; ++attempt) {
+            const std::uint32_t candidate =
+                (binder->layer->next_dequeue_slot + attempt) % 2U;
+            if (binder->layer->slots[candidate].configured) {
+                selected = candidate;
+                break;
+            }
+        }
+        if (selected >= 2U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        binder->layer->next_dequeue_slot = (selected + 1U) % 2U;
+        append_le32(reply, kSuccess);
+        append_le32(reply, selected);
+    } else if (transaction == 1U) {
+        if (parcel.size() < cursor + 4U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const std::uint32_t slot = require_u32(0U);
+        if (slot >= binder->layer->slots.size() ||
+            !binder->layer->slots[slot].configured) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const auto& binding = binder->layer->slots[slot];
+        const auto& buffer = nvmap_buffers_.at(binding.nvmap_handle);
+        append_le32(reply, kSuccess);
+        append_le32(reply, 0x47425546U);
+        append_le32(reply, 1280U);
+        append_le32(reply, 720U);
+        append_le32(reply, 1280U);
+        append_le32(reply, 1U);
+        append_le32(reply, buffer.id);
+        append_le64(reply, binding.offset);
+    } else if (transaction == 7U) {
+        if (parcel.size() < cursor + 4U) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const std::uint32_t slot = require_u32(0U);
+        if (slot >= binder->layer->slots.size() ||
+            !binder->layer->slots[slot].configured) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        const auto& binding = binder->layer->slots[slot];
+        const auto& buffer = nvmap_buffers_.at(binding.nvmap_handle);
+        constexpr std::size_t frame_bytes = 1280U * 720U * 4U;
+        if (!buffer.allocated || binding.offset > buffer.size ||
+            frame_bytes > buffer.size - binding.offset ||
+            buffer.guest_address > std::numeric_limits<std::uint64_t>::max() -
+                binding.offset) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        try {
+            const auto source_pixels = memory_.view(
+                buffer.guest_address + binding.offset, frame_bytes,
+                Permission::Read);
+            binder->layer->presented_rgba = UntileTegraBlockLinear(
+                source_pixels, 1280U, 720U, 16U,
+                (buffer.flags & 1U) != 0U);
+            binder->layer->release_event->signaled = true;
+            binder->layer->frame_number++;
+            binder->layer->vsync_event->signaled = true;
+            append_le32(reply, kSuccess);
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+    } else {
+        response.result = kInvalidCommand;
+        return response;
+    }
+
+    const IpcBufferDescriptor* destination = find_receive_buffer(request);
+    if (destination != nullptr && !reply.empty()) {
+        if (destination->size < reply.size()) {
+            response.result = kInvalidArgument;
+            return response;
+        }
+        try {
+            memory_.write(destination->address, reply);
+        } catch (const std::exception&) {
+            response.result = kInvalidArgument;
+        }
+    } else {
+        response.data = std::move(reply);
+    }
+    return response;
 }
 
 CmifResponse HorizonKernel::dispatch_audio_manager(
@@ -932,6 +1480,19 @@ bool HorizonKernel::running() const noexcept { return running_; }
 const HandleTable& HorizonKernel::handles() const noexcept { return handles_; }
 std::size_t HorizonKernel::romfs_size() const noexcept {
     return romfs_ ? romfs_->size() : 0U;
+}
+
+std::span<const std::uint8_t> HorizonKernel::display_pixels() const noexcept {
+    return display_layer_ ? std::span<const std::uint8_t>(
+        display_layer_->presented_rgba) : std::span<const std::uint8_t>{};
+}
+
+std::uint64_t HorizonKernel::display_frame_number() const noexcept {
+    return display_layer_ ? display_layer_->frame_number : 0U;
+}
+
+void HorizonKernel::signal_vsync() noexcept {
+    if (display_layer_) display_layer_->vsync_event->signaled = true;
 }
 
 SvcHandler::SvcHandler(HorizonKernel& kernel) noexcept : kernel_(kernel) {}

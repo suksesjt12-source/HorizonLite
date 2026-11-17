@@ -2,18 +2,89 @@
 
 #include "horizon/kernel.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
 namespace horizon {
+
+std::vector<std::uint8_t> UntileTegraBlockLinear(
+    std::span<const std::uint8_t> source, std::uint32_t width,
+    std::uint32_t height, std::uint32_t block_height_gobs,
+    bool block_linear) {
+    if (width == 0U || height == 0U)
+        throw std::invalid_argument("Tegra surface dimensions must be nonzero");
+    if (block_height_gobs == 0U || block_height_gobs > 32U ||
+        (block_height_gobs & (block_height_gobs - 1U)) != 0U)
+        throw std::invalid_argument("Tegra block height must be a power of two from 1 to 32");
+    const std::uint64_t pixel_count =
+        static_cast<std::uint64_t>(width) * height;
+    if (pixel_count > std::numeric_limits<std::size_t>::max() / 4U)
+        throw std::overflow_error("Tegra surface dimensions overflow");
+    const std::size_t linear_size = static_cast<std::size_t>(pixel_count) * 4U;
+    if (source.size() < linear_size)
+        throw std::invalid_argument("Tegra source is smaller than a linear RGBA surface");
+
+    if (!block_linear) {
+        return std::vector<std::uint8_t>(source.begin(),
+            source.begin() + static_cast<std::ptrdiff_t>(linear_size));
+    }
+
+    constexpr std::uint64_t gob_bytes = 512U;
+    constexpr std::uint64_t gob_width_bytes = 64U;
+    constexpr std::uint64_t gob_height_rows = 8U;
+    const std::uint64_t row_bytes = static_cast<std::uint64_t>(width) * 4U;
+    const std::uint64_t width_in_gobs =
+        (row_bytes + gob_width_bytes - 1U) / gob_width_bytes;
+    const std::uint64_t gob_rows_per_block =
+        gob_height_rows * block_height_gobs;
+    const std::uint64_t block_rows =
+        (height + gob_rows_per_block - 1U) / gob_rows_per_block;
+    const std::uint64_t tiled_size =
+        width_in_gobs * block_height_gobs * block_rows * gob_bytes;
+
+    if (tiled_size > source.size()) {
+        return std::vector<std::uint8_t>(source.begin(),
+            source.begin() + static_cast<std::ptrdiff_t>(linear_size));
+    }
+
+    std::vector<std::uint8_t> output(linear_size);
+    for (std::uint32_t y = 0U; y < height; ++y) {
+        for (std::uint32_t x = 0U; x < width; ++x) {
+            const std::uint64_t x_byte = static_cast<std::uint64_t>(x) * 4U;
+            const std::uint64_t gob_y = y / gob_rows_per_block;
+            const std::uint64_t block_y = (y % gob_rows_per_block) / gob_height_rows;
+            const std::uint64_t gob_x = x_byte / gob_width_bytes;
+            const std::uint64_t in_gob_x = x_byte % gob_width_bytes;
+            const std::uint64_t in_gob_y = y % gob_height_rows;
+            const std::uint64_t gob_index =
+                gob_y * width_in_gobs * block_height_gobs +
+                gob_x * block_height_gobs + block_y;
+            const std::uint64_t in_gob =
+                (in_gob_x / 32U) * 256U +
+                (in_gob_y / 2U) * 64U +
+                ((in_gob_x % 32U) / 16U) * 32U +
+                (in_gob_y % 2U) * 16U + (in_gob_x % 16U);
+            const std::uint64_t source_offset = gob_index * gob_bytes + in_gob;
+            const std::size_t target_offset =
+                (static_cast<std::size_t>(y) * width + x) * 4U;
+            if (source_offset + 4U > source.size())
+                throw std::runtime_error("Tegra GOB address exceeds source allocation");
+            std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(source_offset),
+                        4U, output.begin() + static_cast<std::ptrdiff_t>(target_offset));
+        }
+    }
+    return output;
+}
 
 SdlDisplay::SdlDisplay() {
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
         throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
     sdl_initialized_ = true;
 
-    window_ = SDL_CreateWindow("HorizonLite Stage 5 - IPC + HID + Audio",
+    window_ = SDL_CreateWindow("HorizonLite Stage 6 - vi:m + nvdrv",
                                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                1280, 720, SDL_WINDOW_SHOWN);
     if (window_ == nullptr) {
@@ -97,32 +168,27 @@ std::uint64_t SdlDisplay::read_controller_buttons() const {
     return buttons;
 }
 
+void SdlDisplay::render(std::span<const std::uint8_t> rgba,
+                        int width, int height) {
+    if (width <= 0 || height <= 0 ||
+        rgba.size() < static_cast<std::size_t>(width) *
+                      static_cast<std::size_t>(height) * 4U)
+        throw std::invalid_argument("SDL display received an invalid RGBA surface");
+    if (SDL_UpdateTexture(texture_, nullptr, rgba.data(), width * 4) != 0)
+        throw std::runtime_error(std::string("SDL_UpdateTexture failed: ") + SDL_GetError());
+    if (SDL_RenderClear(renderer_) != 0 ||
+        SDL_RenderCopy(renderer_, texture_, nullptr, nullptr) != 0)
+        throw std::runtime_error(std::string("SDL render operation failed: ") + SDL_GetError());
+    SDL_RenderPresent(renderer_);
+}
+
 void SdlDisplay::render(const AddressSpace& memory,
                         std::uint64_t framebuffer_address,
                         int width, int height) {
     const std::size_t byte_count = static_cast<std::size_t>(width) *
                                    static_cast<std::size_t>(height) * 4U;
-    const auto pixels = memory.view(framebuffer_address, byte_count,
-                                    Permission::Read);
-
-    void* texture_pixels = nullptr;
-    int texture_pitch = 0;
-    if (SDL_LockTexture(texture_, nullptr, &texture_pixels, &texture_pitch) != 0)
-        throw std::runtime_error(std::string("SDL_LockTexture failed: ") + SDL_GetError());
-
-    const std::size_t row_bytes = static_cast<std::size_t>(width) * 4U;
-    for (int row = 0; row < height; ++row) {
-        const auto* source = pixels.data() + static_cast<std::size_t>(row) * row_bytes;
-        auto* destination = static_cast<std::uint8_t*>(texture_pixels) +
-            static_cast<std::size_t>(row) * static_cast<std::size_t>(texture_pitch);
-        std::memcpy(destination, source, row_bytes);
-    }
-    SDL_UnlockTexture(texture_);
-
-    if (SDL_RenderClear(renderer_) != 0 ||
-        SDL_RenderCopy(renderer_, texture_, nullptr, nullptr) != 0)
-        throw std::runtime_error(std::string("SDL render operation failed: ") + SDL_GetError());
-    SDL_RenderPresent(renderer_);
+    render(memory.view(framebuffer_address, byte_count, Permission::Read),
+           width, height);
 }
 
 } // namespace horizon
