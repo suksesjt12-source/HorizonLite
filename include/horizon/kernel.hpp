@@ -19,7 +19,8 @@ using Handle = std::uint32_t;
 enum class KernelObjectKind : std::uint8_t {
     Port,
     ClientSession,
-    SharedMemory
+    SharedMemory,
+    Storage
 };
 
 class KObject {
@@ -53,6 +54,14 @@ public:
     std::vector<std::uint8_t> bytes;
 };
 
+class KStorage final : public KObject {
+public:
+    explicit KStorage(std::shared_ptr<const std::vector<std::uint8_t>> romfs);
+    [[nodiscard]] const std::vector<std::uint8_t>& romfs() const noexcept;
+private:
+    std::shared_ptr<const std::vector<std::uint8_t>> romfs_;
+};
+
 class HandleTable {
 public:
     [[nodiscard]] Handle insert(std::shared_ptr<KObject> object);
@@ -64,9 +73,18 @@ private:
     std::unordered_map<Handle, std::shared_ptr<KObject>> objects_;
 };
 
+struct IpcBufferDescriptor {
+    std::uint64_t address{};
+    std::uint64_t size{};
+};
+
 struct CmifRequest {
     std::uint32_t command_id{};
     std::vector<std::uint8_t> data;
+    std::vector<IpcBufferDescriptor> pointer_buffers;
+    std::vector<IpcBufferDescriptor> send_buffers;
+    std::vector<IpcBufferDescriptor> receive_buffers;
+    std::vector<IpcBufferDescriptor> exchange_buffers;
 };
 
 struct CmifResponse {
@@ -99,7 +117,8 @@ enum HidButton : std::uint64_t {
 
 class HorizonKernel {
 public:
-    explicit HorizonKernel(AddressSpace& memory);
+    explicit HorizonKernel(AddressSpace& memory,
+                           std::vector<std::uint8_t> romfs = {});
 
     void svc_set_heap_size(CpuState& state);
     void svc_exit_process(CpuState& state) noexcept;
@@ -114,6 +133,7 @@ public:
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] const HandleTable& handles() const noexcept;
+    [[nodiscard]] std::size_t romfs_size() const noexcept;
 
 private:
     struct SharedMapping {
@@ -124,8 +144,12 @@ private:
 
     [[nodiscard]] CmifResponse dispatch_cmif(
         const KClientSession& session, const CmifRequest& request);
+    [[nodiscard]] CmifResponse dispatch_storage(
+        const KStorage& storage, const CmifRequest& request);
     [[nodiscard]] std::string read_guest_string(
         std::uint64_t address, std::size_t maximum) const;
+    [[nodiscard]] std::string read_service_name(
+        const CmifRequest& request) const;
 
     static constexpr std::uint64_t kHeapBase = 0x50000000ULL;
     static constexpr std::uint64_t kMaximumHeapSize = 0x10000000ULL;
@@ -138,6 +162,7 @@ private:
     HandleTable handles_;
     std::unordered_map<std::string, std::shared_ptr<KPort>> ports_;
     std::shared_ptr<KSharedMemory> hid_shared_memory_;
+    std::shared_ptr<const std::vector<std::uint8_t>> romfs_;
     std::unordered_map<Handle, SharedMapping> shared_mappings_;
     std::uint64_t sampling_number_{};
     std::uint64_t heap_size_{};
