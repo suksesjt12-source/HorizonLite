@@ -957,6 +957,281 @@ CmifResponse HorizonKernel::dispatch_storage(
     return response;
 }
 
+
+CmifResponse HorizonKernel::dispatch_applet_service(
+    const std::string& service_name, const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    const auto open_interface = [this, &response](const std::string& name) {
+        response.handle = handles_.insert(std::make_shared<KClientSession>(name));
+        response.move_handle = true;
+    };
+
+    if (service_name == "appletOE") {
+        if (request.command_id == 0U) open_interface("IApplicationProxy");
+        else response.result = kInvalidCommand;
+        return response;
+    }
+    if (service_name == "IApplicationProxy") {
+        switch (request.command_id) {
+        case 0U: open_interface("ICommonStateGetter"); break;
+        case 1U: open_interface("ISelfController"); break;
+        case 2U: open_interface("IWindowController"); break;
+        case 3U: open_interface("IAudioController"); break;
+        case 4U: open_interface("IDisplayController"); break;
+        case 20U: open_interface("IApplicationFunctions"); break;
+        default: response.result = kInvalidCommand; break;
+        }
+        return response;
+    }
+    if (service_name == "ICommonStateGetter") {
+        switch (request.command_id) {
+        case 0U:
+            response.handle = handles_.insert(applet_event_);
+            response.move_handle = false;
+            break;
+        case 1U:
+            if (applet_messages_.empty()) {
+                applet_event_->signaled = false;
+                response.result = MakeResult(128U, 3U);
+            } else {
+                append_le32(response.data, applet_messages_.front());
+                applet_messages_.pop();
+                applet_event_->signaled = !applet_messages_.empty();
+            }
+            break;
+        case 5U:
+            response.data.push_back(0U);
+            break;
+        case 6U:
+            append_le32(response.data, 0U);
+            break;
+        case 9U:
+            response.data.push_back(1U);
+            break;
+        default:
+            response.result = kInvalidCommand;
+            break;
+        }
+        return response;
+    }
+    if (service_name == "ISelfController") {
+        switch (request.command_id) {
+        case 0U:
+        case 1U:
+        case 2U:
+        case 11U:
+        case 12U:
+        case 13U:
+        case 16U:
+            break;
+        default:
+            response.result = kInvalidCommand;
+            break;
+        }
+        return response;
+    }
+    if (service_name == "IWindowController") {
+        if (request.command_id == 1U) append_le64(response.data, 1U);
+        else if (request.command_id != 10U) response.result = kInvalidCommand;
+        return response;
+    }
+    if (service_name == "IApplicationFunctions") {
+        if (request.command_id == 40U) response.data.push_back(1U);
+        else response.result = kInvalidCommand;
+        return response;
+    }
+    if (service_name == "IAudioController" ||
+        service_name == "IDisplayController") {
+        return response;
+    }
+    if (service_name.starts_with("generic_stub:")) {
+        std::cout << "[GenericStubService] " << service_name.substr(13U)
+                  << " command " << request.command_id << " -> success\\n";
+        return response;
+    }
+
+    response.result = kInvalidCommand;
+    return response;
+}
+
+CmifResponse HorizonKernel::dispatch_time_service(
+    const std::string& service_name, const CmifRequest& request) {
+    CmifResponse response;
+    response.command_id = request.command_id;
+    const auto open_interface = [this, &response](const std::string& name) {
+        response.handle = handles_.insert(std::make_shared<KClientSession>(name));
+        response.move_handle = true;
+    };
+
+    if (service_name == "time:u" || service_name == "time:s" ||
+        service_name == "time:a") {
+        switch (request.command_id) {
+        case 0U:
+        case 1U: open_interface("ISystemClock"); break;
+        case 2U: open_interface("ISteadyClock"); break;
+        case 3U: open_interface("ITimeZoneService"); break;
+        default: response.result = kInvalidCommand; break;
+        }
+        return response;
+    }
+    if (service_name == "ISystemClock") {
+        if (request.command_id != 0U) {
+            response.result = kInvalidCommand;
+            return response;
+        }
+        const auto now = std::chrono::system_clock::to_time_t(
+            std::chrono::system_clock::now());
+        append_le64(response.data, static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(now)));
+        return response;
+    }
+    if (service_name == "ISteadyClock") {
+        if (request.command_id != 0U) {
+            response.result = kInvalidCommand;
+            return response;
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - steady_clock_origin_).count();
+        append_le64(response.data, static_cast<std::uint64_t>(elapsed));
+        constexpr std::array<std::uint8_t, 16> clock_uuid{
+            0x48U,0x6FU,0x72U,0x69U,0x7AU,0x6FU,0x6EU,0x4CU,
+            0x69U,0x74U,0x65U,0x2DU,0x54U,0x69U,0x6DU,0x65U
+        };
+        response.data.insert(response.data.end(), clock_uuid.begin(), clock_uuid.end());
+        return response;
+    }
+    if (service_name == "ITimeZoneService") {
+        if (request.command_id == 0U) {
+            std::vector<std::uint8_t> name(0x24U, 0U);
+            name[0] = 'U';
+            name[1] = 'T';
+            name[2] = 'C';
+            const IpcBufferDescriptor* output = find_receive_buffer(request);
+            if (output == nullptr && !request.pointer_buffers.empty())
+                output = &request.pointer_buffers.front();
+            if (output != nullptr) {
+                if (output->size < name.size()) {
+                    response.result = kInvalidArgument;
+                    return response;
+                }
+                memory_.write(output->address, name);
+            }
+            response.data = std::move(name);
+            return response;
+        }
+        if (request.command_id == 100U || request.command_id == 101U) {
+            if (request.data.size() < sizeof(std::int64_t)) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            const std::int64_t seconds = static_cast<std::int64_t>(
+                read_le64(request.data, 0U));
+            const std::time_t timestamp = static_cast<std::time_t>(seconds);
+            const std::tm* converted = std::gmtime(&timestamp);
+            if (converted == nullptr) {
+                response.result = kInvalidArgument;
+                return response;
+            }
+            std::vector<std::uint8_t> calendar;
+            calendar.reserve(0x38U);
+            const auto year = static_cast<std::uint16_t>(converted->tm_year + 1900);
+            calendar.push_back(static_cast<std::uint8_t>(year & 0xFFU));
+            calendar.push_back(static_cast<std::uint8_t>(year >> 8U));
+            calendar.push_back(static_cast<std::uint8_t>(converted->tm_mon + 1));
+            calendar.push_back(static_cast<std::uint8_t>(converted->tm_mday));
+            calendar.push_back(static_cast<std::uint8_t>(converted->tm_hour));
+            calendar.push_back(static_cast<std::uint8_t>(converted->tm_min));
+            calendar.push_back(static_cast<std::uint8_t>(converted->tm_sec));
+            calendar.push_back(0U);
+            append_le32(calendar, static_cast<std::uint32_t>(converted->tm_wday));
+            append_le32(calendar, static_cast<std::uint32_t>(converted->tm_yday));
+            append_le32(calendar, 0U);
+            std::array<std::uint8_t, 0x24U> zone_name{};
+            zone_name[0] = 'U';
+            zone_name[1] = 'T';
+            zone_name[2] = 'C';
+            calendar.insert(calendar.end(), zone_name.begin(), zone_name.end());
+
+            const IpcBufferDescriptor* output = find_receive_buffer(request);
+            if (output == nullptr && !request.pointer_buffers.empty())
+                output = &request.pointer_buffers.front();
+            if (output != nullptr) {
+                if (output->size < calendar.size()) {
+                    response.result = kInvalidArgument;
+                    return response;
+                }
+                memory_.write(output->address, calendar);
+            }
+            response.data = std::move(calendar);
+            return response;
+        }
+        response.result = kInvalidCommand;
+        return response;
+    }
+
+    response.result = kInvalidCommand;
+    return response;
+}
+
+bool HorizonKernel::validate_stage9_services() {
+    CmifRequest request{};
+    request.command_id = 0U;
+    const CmifResponse applet = dispatch_applet_service("appletOE", request);
+    if (applet.result != kSuccess || !applet.handle.has_value()) return false;
+    const CmifResponse common = dispatch_applet_service("IApplicationProxy", request);
+    if (common.result != kSuccess || !common.handle.has_value()) return false;
+
+    request.command_id = 9U;
+    const CmifResponse focus =
+        dispatch_applet_service("ICommonStateGetter", request);
+    if (focus.result != kSuccess || focus.data.empty() || focus.data[0] != 1U)
+        return false;
+
+    const auto queued_messages = applet_messages_;
+    request.command_id = 1U;
+    const CmifResponse first_message =
+        dispatch_applet_service("ICommonStateGetter", request);
+    const CmifResponse empty_message =
+        dispatch_applet_service("ICommonStateGetter", request);
+    applet_messages_ = queued_messages;
+    applet_event_->signaled = true;
+    if (first_message.result != kSuccess || first_message.data.size() < 4U ||
+        read_le32(first_message.data, 0U) != 15U ||
+        empty_message.result != MakeResult(128U, 3U))
+        return false;
+
+    request.command_id = 3U;
+    const CmifResponse timezone =
+        dispatch_time_service("time:u", request);
+    if (timezone.result != kSuccess || !timezone.handle.has_value()) return false;
+
+    request.command_id = 100U;
+    request.data.assign(8U, 0U);
+    const CmifResponse calendar =
+        dispatch_time_service("ITimeZoneService", request);
+    if (calendar.result != kSuccess || calendar.data.size() < 8U)
+        return false;
+    const std::uint16_t year = static_cast<std::uint16_t>(calendar.data[0]) |
+        static_cast<std::uint16_t>(calendar.data[1] << 8U);
+    return year == 1970U && calendar.data[2] == 1U &&
+           calendar.data[3] == 1U;
+}
+
+void HorizonKernel::print_ipc_statistics() const {
+    std::cout << "IPC services accessed:\\n";
+    if (ipc_accessed_.empty()) {
+        std::cout << "  (none)\\n";
+        return;
+    }
+    for (const auto& [service, commands] : ipc_accessed_) {
+        std::cout << "  " << service << ":";
+        for (const std::uint32_t command : commands)
+            std::cout << " " << command;
+        std::cout << '\\n';
+    }
+}
+
 CmifResponse HorizonKernel::dispatch_cmif(
     const KClientSession& session, const CmifRequest& request) {
     CmifResponse response;
