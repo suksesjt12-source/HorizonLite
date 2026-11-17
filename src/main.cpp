@@ -627,8 +627,8 @@ std::uint64_t load_self_test(horizon::AddressSpace& memory) {
                horizon::Permission::Read | horizon::Permission::Execute);
     memory.map(kSelfTestStringsAddress, service_strings,
                horizon::Permission::Read);
-    std::cout << "HorizonLite Stage 4 self-test: guest connects to sm:, requests hid and fsp-srv, "
-                 "reads sprite.rgba through IStorage::Read, then draws the sprite from guest RAM.\n";
+    std::cout << "HorizonLite Stage 5 self-test: guest connects to sm:, hid, fsp-srv and audout:u, "
+                 "loads the RomFS sprite, and queues a 440 Hz stereo beep when A/Z is pressed.\n";
     return kSelfTestTextAddress;
 }
 
