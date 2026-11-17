@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <stdexcept>
