@@ -1044,11 +1044,11 @@ void verify_self_test(const horizon::AddressSpace& memory,
         memory.read_u32(shared_data + 4U);
     if (!sprite_pixel_found || worker_position == 100U) {
         std::cerr << "  Sprite pixel found: " << sprite_pixel_found
-                  << "  Worker position: " << worker_position << '\\n';
+                  << "  Worker position: " << worker_position << '\n';
         throw std::runtime_error(
             "vi:m QueueBuffer did not present the moving RomFS sprite from the worker thread");
     }
-    std::cout << "vi:m + nvdrv/nvmap + Binder QueueBuffer + worker-thread motion self-test passed\\n"
+    std::cout << "vi:m + nvdrv/nvmap + Binder QueueBuffer + worker-thread motion self-test passed\n"
               << "  Worker position: " << worker_position
               << "  Frames: " << frame_number << '\\n';
 }
