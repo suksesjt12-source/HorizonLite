@@ -1237,14 +1237,20 @@ void HorizonKernel::print_ipc_statistics() const {
     std::cout << "IPC services accessed:\n";
     if (ipc_accessed_.empty()) {
         std::cout << "  (none)\n";
-        return;
+    } else {
+        for (const auto& [service, commands] : ipc_accessed_) {
+            std::cout << "  " << service << ":";
+            for (const std::uint32_t command : commands)
+                std::cout << " " << command;
+            std::cout << '\n';
+        }
     }
-    for (const auto& [service, commands] : ipc_accessed_) {
-        std::cout << "  " << service << ":";
-        for (const std::uint32_t command : commands)
-            std::cout << " " << command;
-        std::cout << '\n';
-    }
+    std::cout << "GPU: submissions=" << gpu_channel_.submissions()
+              << ", pushbuffer_words=" << gpu_channel_.pusher().words_processed()
+              << ", methods=" << gpu_channel_.pusher().methods_processed()
+              << ", draws=" << gpu_channel_.engine().draw_calls()
+              << ", triangles=" << gpu_channel_.engine().triangles()
+              << ", clears=" << gpu_channel_.engine().clear_calls() << '\n';
 }
 
 CmifResponse HorizonKernel::dispatch_cmif(
