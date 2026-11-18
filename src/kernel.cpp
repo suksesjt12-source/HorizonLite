@@ -1684,6 +1684,15 @@ CmifResponse HorizonKernel::dispatch_nvdrv(
             error = kInvalidArgument;
         }
 
+        if (device->second != "/dev/nvmap") {
+            if (error == kSuccess) {
+                if (output->size < out.size()) error = kInvalidArgument;
+                else memory_.write(output->address, out);
+            }
+            append_le32(response.data, error);
+            return response;
+        }
+
         constexpr std::uint32_t kNvMapCreate = 0xC0080101U;
         constexpr std::uint32_t kNvMapFromId = 0xC0080103U;
         constexpr std::uint32_t kNvMapAlloc = 0xC0200104U;
