@@ -306,6 +306,7 @@ std::uint64_t Maxwell3DEngine::upload_bound_texture() {
             std::copy(source.begin(), source.end(), rgba.begin());
         }
     } else if (texture_format == 1U) {
+        constexpr std::uint64_t gob_height = 8U;
         const std::uint64_t row_bytes = static_cast<std::uint64_t>(texture_width) * 2U;
         const std::uint64_t bh = block_linear ? tiling_height : 1U;
         for (std::uint32_t y = 0U; y < texture_height; ++y) {
