@@ -114,6 +114,31 @@ SdlDisplay::SdlDisplay() {
         window_ = nullptr;
     }
 
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    window_ = SDL_CreateWindow("HorizonLite Stage 11 - OpenGL ES 3.0",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
+    if (window_ != nullptr) {
+        gl_context_ = SDL_GL_CreateContext(window_);
+        if (gl_context_ != nullptr && SDL_GL_MakeCurrent(window_, gl_context_) == 0) {
+            (void)SDL_GL_SetSwapInterval(1);
+            try {
+                gl_renderer_ = std::make_unique<OpenGLRenderer>(window_, 1280, 720);
+                return;
+            } catch (const std::exception&) {
+                gl_renderer_.reset();
+            }
+        }
+        if (gl_context_ != nullptr) {
+            SDL_GL_DeleteContext(gl_context_);
+            gl_context_ = nullptr;
+        }
+        SDL_DestroyWindow(window_);
+        window_ = nullptr;
+    }
+
     create_software_fallback();
 }
 
