@@ -1,6 +1,7 @@
 #include "horizon/gpu.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -192,18 +193,53 @@ std::uint64_t Maxwell3DEngine::draw_calls() const noexcept{return draw_calls_;}
 std::uint64_t Maxwell3DEngine::triangles() const noexcept{return triangles_;}
 std::uint64_t Maxwell3DEngine::clear_calls() const noexcept{return clear_calls_;}
 
-DmaPusher::DmaPusher(Maxwell3DEngine& engine):engine_(engine){}
-void DmaPusher::push(std::uint64_t address,std::uint32_t count) {
-    if(count>1U<<20U) throw std::runtime_error("pushbuffer word count exceeds limit");
-    const auto bytes=std::span<const std::uint8_t>();
-    (void)bytes;
-    throw std::logic_error("DmaPusher requires an AddressSpace-bound channel");
+DmaPusher::DmaPusher(AddressSpace& memory, Maxwell3DEngine& engine)
+    : memory_(memory), engine_(engine) {}
+void DmaPusher::push(std::uint64_t address, std::uint32_t count) {
+    if (count == 0U || count > (1U << 20U))
+        throw std::runtime_error("pushbuffer word count is outside the supported range");
+    const auto stream = memory_.view(address, static_cast<std::size_t>(count) * 4U);
+    std::vector<std::uint32_t> words(count);
+    for (std::uint32_t i = 0U; i < count; ++i) {
+        const std::size_t p = static_cast<std::size_t>(i) * 4U;
+        words[i] = static_cast<std::uint32_t>(stream[p]) |
+            (static_cast<std::uint32_t>(stream[p + 1U]) << 8U) |
+            (static_cast<std::uint32_t>(stream[p + 2U]) << 16U) |
+            (static_cast<std::uint32_t>(stream[p + 3U]) << 24U);
+    }
+    std::size_t cursor = 0U;
+    while (cursor < words.size()) {
+        const std::uint32_t header = words[cursor++];
+        const std::uint32_t mode = (header >> 29U) & 0x7U;
+        const std::uint32_t method = header & 0x1FFFU;
+        const std::uint32_t subchannel = (header >> 13U) & 0x7U;
+        const std::uint32_t argument_count = (header >> 16U) & 0x1FFFU;
+        ++words_processed_;
+        if (mode == 4U) {
+            engine_.write_method(subchannel, method, (header >> 16U) & 0x1FFFU);
+            ++methods_processed_;
+            continue;
+        }
+        if (mode != 1U && mode != 3U && mode != 5U)
+            throw std::runtime_error("unsupported Tegra submission mode");
+        if (argument_count == 0U || argument_count > words.size() - cursor)
+            throw std::runtime_error("truncated Tegra pushbuffer method packet");
+        for (std::uint32_t i = 0U; i < argument_count; ++i) {
+            const std::uint32_t argument = words[cursor++];
+            std::uint32_t target = method;
+            if (mode == 1U) target = method + i;
+            else if (mode == 5U && i != 0U) target = method + 1U;
+            engine_.write_method(subchannel, target, argument);
+            ++words_processed_;
+            ++methods_processed_;
+        }
+    }
 }
 std::uint64_t DmaPusher::words_processed() const noexcept{return words_processed_;}
 std::uint64_t DmaPusher::methods_processed() const noexcept{return methods_processed_;}
 
 GpuChannel::GpuChannel(AddressSpace& memory,GpuAddressSpace& as)
-    :memory_(memory),address_space_(as),engine_(memory,as),pusher_(engine_){}
+    :memory_(memory),address_space_(as),engine_(memory,as),pusher_(memory_,engine_){}
 void GpuChannel::set_nvmap_fd(std::int32_t fd) noexcept{nvmap_fd_=fd;}
 void GpuChannel::set_timeout(std::uint32_t timeout) noexcept{timeout_=timeout;}
 void GpuChannel::set_priority(std::uint32_t priority) noexcept{priority_=priority;}
