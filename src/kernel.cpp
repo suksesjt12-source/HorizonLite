@@ -1,5 +1,6 @@
 #include "horizon/kernel.hpp"
 #include "horizon/display.hpp"
+#include "horizon/gpu.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -367,6 +368,7 @@ HorizonKernel::HorizonKernel(AddressSpace& memory,
       hid_shared_memory_(std::make_shared<KSharedMemory>(kHidSharedMemorySize)),
       romfs_(std::make_shared<const std::vector<std::uint8_t>>(std::move(romfs))),
       audio_device_(audio),
+      gpu_channel_(memory_, gpu_address_space_),
       display_layer_(std::make_shared<KDisplayLayer>()),
       applet_event_(std::make_shared<KEvent>()) {
     applet_event_->signaled = true;
@@ -1235,14 +1237,20 @@ void HorizonKernel::print_ipc_statistics() const {
     std::cout << "IPC services accessed:\n";
     if (ipc_accessed_.empty()) {
         std::cout << "  (none)\n";
-        return;
+    } else {
+        for (const auto& [service, commands] : ipc_accessed_) {
+            std::cout << "  " << service << ":";
+            for (const std::uint32_t command : commands)
+                std::cout << " " << command;
+            std::cout << '\n';
+        }
     }
-    for (const auto& [service, commands] : ipc_accessed_) {
-        std::cout << "  " << service << ":";
-        for (const std::uint32_t command : commands)
-            std::cout << " " << command;
-        std::cout << '\n';
-    }
+    std::cout << "GPU: submissions=" << gpu_channel_.submissions()
+              << ", pushbuffer_words=" << gpu_channel_.pusher().words_processed()
+              << ", methods=" << gpu_channel_.pusher().methods_processed()
+              << ", draws=" << gpu_channel_.engine().draw_calls()
+              << ", triangles=" << gpu_channel_.engine().triangles()
+              << ", clears=" << gpu_channel_.engine().clear_calls() << '\n';
 }
 
 CmifResponse HorizonKernel::dispatch_cmif(
@@ -1531,7 +1539,8 @@ CmifResponse HorizonKernel::dispatch_nvdrv(
                 Permission::Read);
             const std::string path = trim_string(path_bytes);
             if (path != "/dev/nvmap" && path != "/dev/nvhost-ctrl" &&
-                path != "/dev/nvhost-gpu") {
+                path != "/dev/nvhost-gpu" && path != "/dev/nvhost-as-gpu" &&
+                path != "/dev/nvhost-ctrl-gpu") {
                 append_le32(response.data, 0xFFFFFFFFU);
                 append_le32(response.data, kInvalidArgument);
                 return response;
@@ -1567,7 +1576,7 @@ CmifResponse HorizonKernel::dispatch_nvdrv(
     const std::int32_t fd = static_cast<std::int32_t>(read_le32(request.data, 0U));
     const std::uint32_t ioctl_code = read_le32(request.data, 4U);
     const auto device = nv_devices_.find(fd);
-    if (device == nv_devices_.end() || device->second != "/dev/nvmap") {
+    if (device == nv_devices_.end()) {
         append_le32(response.data, kInvalidArgument);
         return response;
     }
@@ -1586,9 +1595,109 @@ CmifResponse HorizonKernel::dispatch_nvdrv(
         const auto input_bytes = memory_.view(
             input->address, static_cast<std::size_t>(input->size),
             Permission::Read);
-        std::vector<std::uint8_t> out(
-            input_bytes.begin(), input_bytes.end());
+        std::vector<std::uint8_t> out(input_bytes.begin(), input_bytes.end());
         std::uint32_t error = kSuccess;
+
+        if (device->second == "/dev/nvhost-ctrl-gpu") {
+            if (ioctl_code == nvhost_ioctl::GetCharacteristics) {
+                out.assign(std::max<std::size_t>(out.size(), 0xA0U), 0U);
+                write_le32(out, 0U, 0x120U);
+                write_le32(out, 4U, 0xBU);
+                write_le32(out, 8U, 0xA1U);
+                write_le32(out, 12U, 1U);
+                write_le32(out, 16U, 2U);
+                write_le32(out, 20U, 1U);
+                write_le32(out, 24U, 0x503U);
+                write_le32(out, 28U, 0x503U);
+            } else if (ioctl_code == nvhost_ioctl::ZcullGetCtxSize) {
+                out.assign(4U, 0U); write_le32(out, 0U, 0x1000U);
+            } else if (ioctl_code == nvhost_ioctl::ZcullGetInfo) {
+                out.assign(0x18U, 0U);
+                write_le32(out, 0U, 0x1000U);
+                write_le32(out, 4U, 0x10U);
+                write_le32(out, 8U, 0x20U);
+                write_le32(out, 12U, 0x10U);
+                write_le32(out, 16U, 0x20U);
+                write_le32(out, 20U, 1U);
+            } else if (ioctl_code == nvhost_ioctl::GetTpcMasks) {
+                out.assign(8U, 0U); write_le32(out, 0U, 1U); write_le32(out, 4U, 0x3U);
+            } else error = kInvalidCommand;
+        } else if (device->second == "/dev/nvhost-as-gpu") {
+            if (ioctl_code == nvhost_ioctl::AllocAs || ioctl_code == nvhost_ioctl::BindChannel) {
+                out.assign(4U, 0U);
+            } else if (ioctl_code == nvhost_ioctl::AllocSpace) {
+                if (input_bytes.size() < 16U) error = kInvalidArgument;
+                else {
+                    const std::uint64_t size = read_le64(input_bytes, 0U);
+                    const std::uint32_t page = read_le32(input_bytes, 8U);
+                    const std::uint64_t va = gpu_address_space_.allocate(size, page == 0U ? 0x1000U : page);
+                    out.assign(16U, 0U); write_le64(out, 0U, va); write_le64(out, 8U, size);
+                }
+            } else if (ioctl_code == nvhost_ioctl::MapBufferEx) {
+                if (input_bytes.size() < 32U) error = kInvalidArgument;
+                else {
+                    const std::uint32_t handle = read_le32(input_bytes, 0U);
+                    const std::uint64_t va = read_le64(input_bytes, 8U);
+                    const std::uint64_t offset = read_le64(input_bytes, 16U);
+                    const std::uint64_t size = read_le64(input_bytes, 24U);
+                    const auto found = nvmap_buffers_.find(handle);
+                    if (found == nvmap_buffers_.end() || !found->second.allocated ||
+                        offset > found->second.size || size == 0U ||
+                        size > found->second.size - offset) error = kInvalidArgument;
+                    else {
+                        gpu_address_space_.map_buffer(handle, va,
+                            found->second.guest_address + offset, size);
+                        out.assign(8U, 0U); write_le64(out, 0U, offset);
+                    }
+                }
+            } else if (ioctl_code == nvhost_ioctl::UnmapBuffer) {
+                if (input_bytes.size() < 8U) error = kInvalidArgument;
+                else gpu_address_space_.unmap(read_le64(input_bytes, 0U));
+            } else if (ioctl_code == nvhost_ioctl::FreeSpace) {
+                if (input_bytes.size() < 16U) error = kInvalidArgument;
+                else gpu_address_space_.free_space(read_le64(input_bytes, 0U),
+                                                    read_le64(input_bytes, 8U));
+            } else error = kInvalidCommand;
+        } else if (device->second == "/dev/nvhost-gpu") {
+            if (ioctl_code == nvhost_ioctl::SetNvmapFd) {
+                if (input_bytes.size() < 4U) error = kInvalidArgument;
+                else gpu_channel_.set_nvmap_fd(static_cast<std::int32_t>(read_le32(input_bytes, 0U)));
+            } else if (ioctl_code == nvhost_ioctl::SetTimeout) {
+                if (input_bytes.size() < 4U) error = kInvalidArgument;
+                else gpu_channel_.set_timeout(read_le32(input_bytes, 0U));
+            } else if (ioctl_code == nvhost_ioctl::SetPriority) {
+                if (input_bytes.size() < 4U) error = kInvalidArgument;
+                else gpu_channel_.set_priority(read_le32(input_bytes, 0U));
+            } else if (ioctl_code == nvhost_ioctl::SetErrorNotifier ||
+                       ioctl_code == nvhost_ioctl::ZcullBind) {
+                error = kSuccess;
+            } else if (ioctl_code == nvhost_ioctl::AllocGpfifoEx) {
+                if (input_bytes.size() < 4U) error = kInvalidArgument;
+                else gpu_channel_.allocate_gpfifo(read_le32(input_bytes, 0U));
+            } else if (ioctl_code == nvhost_ioctl::AllocObjCtx) {
+                if (input_bytes.size() < 4U) error = kInvalidArgument;
+                else {
+                    const auto id = gpu_channel_.allocate_object_context(read_le32(input_bytes, 0U));
+                    out.assign(4U, 0U); write_le32(out, 0U, id);
+                }
+            } else if (ioctl_code == nvhost_ioctl::SubmitGpfifo ||
+                       ioctl_code == nvhost_ioctl::SubmitGpfifoEx) {
+                if (input_bytes.size() < 12U) error = kInvalidArgument;
+                else gpu_channel_.submit_gpfifo(read_le64(input_bytes, 0U),
+                                                read_le32(input_bytes, 8U));
+            } else error = kInvalidCommand;
+        } else if (device->second != "/dev/nvmap") {
+            error = kInvalidArgument;
+        }
+
+        if (device->second != "/dev/nvmap") {
+            if (error == kSuccess) {
+                if (output->size < out.size()) error = kInvalidArgument;
+                else memory_.write(output->address, out);
+            }
+            append_le32(response.data, error);
+            return response;
+        }
 
         constexpr std::uint32_t kNvMapCreate = 0xC0080101U;
         constexpr std::uint32_t kNvMapFromId = 0xC0080103U;
