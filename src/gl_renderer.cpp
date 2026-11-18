@@ -33,6 +33,34 @@ void main() {
     fragmentColor = vColor * sampled;
 }
 )GLSL";
+
+constexpr const char* kVertexShaderEs = R"GLSL(#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aPosition;
+layout(location = 1) in vec4 aColor;
+layout(location = 2) in vec2 aUv;
+uniform mat4 uMvp;
+out vec4 vColor;
+out vec2 vUv;
+void main() {
+    gl_Position = uMvp * vec4(aPosition, 1.0);
+    vColor = aColor;
+    vUv = aUv;
+}
+)GLSL";
+
+constexpr const char* kFragmentShaderEs = R"GLSL(#version 300 es
+precision mediump float;
+in vec4 vColor;
+in vec2 vUv;
+uniform sampler2D uTexture;
+uniform int uTextureEnabled;
+out vec4 fragmentColor;
+void main() {
+    vec4 sampled = (uTextureEnabled != 0) ? texture(uTexture, vUv) : vec4(1.0);
+    fragmentColor = vColor * sampled;
+}
+)GLSL";
 }
 
 OpenGLRenderer::OpenGLRenderer(SDL_Window* window, int width, int height)
@@ -41,6 +69,9 @@ OpenGLRenderer::OpenGLRenderer(SDL_Window* window, int width, int height)
         throw std::invalid_argument("OpenGL renderer requires a valid SDL window and dimensions");
     if (SDL_GL_GetCurrentContext() == nullptr)
         throw std::runtime_error("OpenGL renderer requires a current SDL_GLContext");
+    int profile = 0;
+    if (SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &profile) == 0)
+        is_gles_ = profile == SDL_GL_CONTEXT_PROFILE_ES;
     load_functions();
     create_program();
     create_framebuffer();
@@ -156,7 +187,13 @@ void OpenGLRenderer::load_functions() {
     LOAD_GL(CullFace);
     LOAD_GL(BlendFunc);
     LOAD_GL(ClearColor);
-    LOAD_GL(ClearDepth);
+    if (is_gles_) {
+        ClearDepthf_ = reinterpret_cast<ClearDepthfProc>(
+            SDL_GL_GetProcAddress("glClearDepthf"));
+        require(ClearDepthf_ != nullptr, "Missing OpenGL ES entry point: glClearDepthf");
+    } else {
+        LOAD_GL(ClearDepth);
+    }
     LOAD_GL(Clear);
 #undef LOAD_GL
 }
@@ -182,10 +219,12 @@ GLuint OpenGLRenderer::compile_shader(GLenum type, const char* source) {
 }
 
 void OpenGLRenderer::create_program() {
-    const GLuint vertex = compile_shader(GL_VERTEX_SHADER, kVertexShader);
+    const char* vertex_source = is_gles_ ? kVertexShaderEs : kVertexShader;
+    const char* fragment_source = is_gles_ ? kFragmentShaderEs : kFragmentShader;
+    const GLuint vertex = compile_shader(GL_VERTEX_SHADER, vertex_source);
     GLuint fragment = 0U;
     try {
-        fragment = compile_shader(GL_FRAGMENT_SHADER, kFragmentShader);
+        fragment = compile_shader(GL_FRAGMENT_SHADER, fragment_source);
         program_ = CreateProgram_();
         require(program_ != 0U, "glCreateProgram failed");
         AttachShader_(program_, vertex);
@@ -304,7 +343,8 @@ void OpenGLRenderer::set_raster_state(bool cull_enabled, GLenum front_face,
 void OpenGLRenderer::clear(float r, float g, float b, float a, double depth) {
     begin_frame();
     ClearColor_(r, g, b, a);
-    ClearDepth_(depth);
+    if (is_gles_) ClearDepthf_(static_cast<GLfloat>(depth));
+    else ClearDepth_(depth);
     Clear_(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     pending_gpu_frame_ = true;
 }
