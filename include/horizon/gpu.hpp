@@ -7,11 +7,12 @@
 #include <cstdint>
 #include <map>
 #include <span>
-#include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace horizon {
+
+class OpenGLRenderer;
 
 struct GpuMapping {
     std::uint64_t gpu_va{};
@@ -40,6 +41,7 @@ private:
 struct GpuVertex {
     float x{}, y{}, z{};
     float r{}, g{}, b{}, a{1.0F};
+    float u{}, v{};
 };
 
 class Maxwell3DEngine {
@@ -47,6 +49,7 @@ public:
     explicit Maxwell3DEngine(AddressSpace& memory, GpuAddressSpace& address_space);
     void write_method(std::uint32_t subchannel, std::uint32_t method,
                       std::uint32_t argument);
+    void set_renderer(OpenGLRenderer* renderer) noexcept;
     [[nodiscard]] const std::array<std::uint32_t, 0x1000>& registers() const noexcept;
     [[nodiscard]] std::uint64_t draw_calls() const noexcept;
     [[nodiscard]] std::uint64_t triangles() const noexcept;
@@ -54,6 +57,9 @@ public:
 private:
     void clear_color();
     void draw_vertex_array(std::uint32_t first, std::uint32_t count);
+    void draw_index_array(std::uint32_t first, std::uint32_t count);
+    void update_renderer_state();
+    [[nodiscard]] std::uint64_t upload_bound_texture();
     void rasterize_triangle(const GpuVertex& a, const GpuVertex& b,
                             const GpuVertex& c);
     void write_semaphore();
@@ -61,6 +67,7 @@ private:
 
     AddressSpace& memory_;
     GpuAddressSpace& address_space_;
+    OpenGLRenderer* renderer_{};
     std::array<std::uint32_t, 0x1000> regs_{};
     std::array<std::uint32_t, 8> objects_{};
     std::uint64_t render_target_va_{};
@@ -87,6 +94,7 @@ public:
     void set_nvmap_fd(std::int32_t fd) noexcept;
     void set_timeout(std::uint32_t timeout) noexcept;
     void set_priority(std::uint32_t priority) noexcept;
+    void set_renderer(OpenGLRenderer* renderer) noexcept;
     [[nodiscard]] std::uint32_t allocate_object_context(std::uint32_t class_id);
     void allocate_gpfifo(std::uint32_t entries);
     void submit_gpfifo(std::uint64_t guest_entries_address, std::uint32_t entries);

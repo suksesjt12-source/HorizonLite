@@ -1,6 +1,7 @@
 #include "horizon/display.hpp"
 
 #include "horizon/kernel.hpp"
+#include "horizon/gl_renderer.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -84,45 +85,90 @@ SdlDisplay::SdlDisplay() {
         throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
     sdl_initialized_ = true;
 
-    window_ = SDL_CreateWindow("HorizonLite Stage 6 - vi:m + nvdrv",
-                               SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                               1280, 720, SDL_WINDOW_SHOWN);
-    if (window_ == nullptr) {
-        const std::string error = SDL_GetError();
-        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-        sdl_initialized_ = false;
-        throw std::runtime_error("SDL_CreateWindow failed: " + error);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
+    window_ = SDL_CreateWindow("HorizonLite Stage 11 - OpenGL Maxwell HLE",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
+    if (window_ != nullptr) {
+        gl_context_ = SDL_GL_CreateContext(window_);
+        if (gl_context_ != nullptr && SDL_GL_MakeCurrent(window_, gl_context_) == 0) {
+            (void)SDL_GL_SetSwapInterval(1);
+            try {
+                gl_renderer_ = std::make_unique<OpenGLRenderer>(window_, 1280, 720);
+                return;
+            } catch (const std::exception&) {
+                gl_renderer_.reset();
+            }
+        }
+        if (gl_context_ != nullptr) {
+            SDL_GL_DeleteContext(gl_context_);
+            gl_context_ = nullptr;
+        }
+        SDL_DestroyWindow(window_);
+        window_ = nullptr;
     }
 
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    window_ = SDL_CreateWindow("HorizonLite Stage 11 - OpenGL ES 3.0",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
+    if (window_ != nullptr) {
+        gl_context_ = SDL_GL_CreateContext(window_);
+        if (gl_context_ != nullptr && SDL_GL_MakeCurrent(window_, gl_context_) == 0) {
+            (void)SDL_GL_SetSwapInterval(1);
+            try {
+                gl_renderer_ = std::make_unique<OpenGLRenderer>(window_, 1280, 720);
+                return;
+            } catch (const std::exception&) {
+                gl_renderer_.reset();
+            }
+        }
+        if (gl_context_ != nullptr) {
+            SDL_GL_DeleteContext(gl_context_);
+            gl_context_ = nullptr;
+        }
+        SDL_DestroyWindow(window_);
+        window_ = nullptr;
+    }
+
+    create_software_fallback();
+}
+
+void SdlDisplay::create_software_fallback() {
+    window_ = SDL_CreateWindow("HorizonLite - 2D compatibility display",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+    if (window_ == nullptr)
+        throw std::runtime_error(std::string("SDL window creation failed: ") + SDL_GetError());
     renderer_ = SDL_CreateRenderer(
         window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (renderer_ == nullptr)
         renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
-    if (renderer_ == nullptr) {
-        const std::string error = SDL_GetError();
-        SDL_DestroyWindow(window_);
-        window_ = nullptr;
-        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-        sdl_initialized_ = false;
-        throw std::runtime_error("SDL_CreateRenderer failed: " + error);
-    }
-
+    if (renderer_ == nullptr)
+        throw std::runtime_error(std::string("SDL fallback renderer failed: ") + SDL_GetError());
     texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32,
                                  SDL_TEXTUREACCESS_STREAMING, 1280, 720);
-    if (texture_ == nullptr) {
-        const std::string error = SDL_GetError();
-        SDL_DestroyRenderer(renderer_);
-        SDL_DestroyWindow(window_);
-        renderer_ = nullptr;
-        window_ = nullptr;
-        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-        sdl_initialized_ = false;
-        throw std::runtime_error("SDL_CreateTexture failed: " + error);
-    }
+    if (texture_ == nullptr)
+        throw std::runtime_error(std::string("SDL fallback texture failed: ") + SDL_GetError());
     SDL_SetTextureBlendMode(texture_, SDL_BLENDMODE_NONE);
 }
 
 SdlDisplay::~SdlDisplay() {
+    if (gl_context_ != nullptr)
+        SDL_GL_MakeCurrent(window_, gl_context_);
+    gl_renderer_.reset();
+    if (gl_context_ != nullptr) {
+        SDL_GL_DeleteContext(gl_context_);
+        gl_context_ = nullptr;
+    }
     if (texture_ != nullptr) SDL_DestroyTexture(texture_);
     if (renderer_ != nullptr) SDL_DestroyRenderer(renderer_);
     if (window_ != nullptr) SDL_DestroyWindow(window_);
@@ -174,12 +220,23 @@ void SdlDisplay::render(std::span<const std::uint8_t> rgba,
         rgba.size() < static_cast<std::size_t>(width) *
                       static_cast<std::size_t>(height) * 4U)
         throw std::invalid_argument("SDL display received an invalid RGBA surface");
+    if (gl_renderer_ != nullptr) {
+        if (!gl_renderer_->has_pending_gpu_frame())
+            gl_renderer_->upload_rgba(rgba, width, height);
+        gl_renderer_->present();
+        return;
+    }
     if (SDL_UpdateTexture(texture_, nullptr, rgba.data(), width * 4) != 0)
         throw std::runtime_error(std::string("SDL_UpdateTexture failed: ") + SDL_GetError());
     if (SDL_RenderClear(renderer_) != 0 ||
         SDL_RenderCopy(renderer_, texture_, nullptr, nullptr) != 0)
         throw std::runtime_error(std::string("SDL render operation failed: ") + SDL_GetError());
     SDL_RenderPresent(renderer_);
+}
+
+OpenGLRenderer* SdlDisplay::gl_renderer() noexcept { return gl_renderer_.get(); }
+bool SdlDisplay::hardware_renderer_available() const noexcept {
+    return gl_renderer_ != nullptr && gl_renderer_->available();
 }
 
 void SdlDisplay::render(const AddressSpace& memory,

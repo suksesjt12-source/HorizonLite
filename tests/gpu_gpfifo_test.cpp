@@ -85,4 +85,22 @@ int main() {
     assert(regs[0x0705U] == 0x123U);
     assert(channel.pusher().methods_processed() == 19U);
     assert(channel.submissions() == 2U);
+
+    const std::uint64_t index_guest = 0x122000U;
+    memory.write_u16(index_guest, 0U);
+    memory.write_u16(index_guest + 2U, 1U);
+    memory.write_u16(index_guest + 4U, 2U);
+    const auto index_va = as.allocate(6U, 0x1000U);
+    as.map_buffer(5U, index_va, index_guest, 6U);
+    channel.engine().write_method(0U, 0x05F2U,
+                                  static_cast<std::uint32_t>(index_va >> 32U));
+    channel.engine().write_method(0U, 0x05F3U,
+                                  static_cast<std::uint32_t>(index_va));
+    channel.engine().write_method(0U, 0x05F6U, 1U);
+    channel.engine().write_method(0U, 0x04B3U, 1U);
+    channel.engine().write_method(0U, 0x048CU, 1U);
+    channel.engine().write_method(0U, 0x04A2U, 1U);
+    channel.engine().write_method(0U, 0x035FU, 3U << 16U);
+    assert(channel.engine().draw_calls() == 2U);
+    assert(channel.engine().triangles() == 2U);
 }

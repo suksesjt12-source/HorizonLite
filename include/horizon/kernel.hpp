@@ -267,6 +267,7 @@ public:
 
     void svc_set_heap_size(CpuState& state);
     void prepare_loader_heap(std::uint64_t capacity);
+    void attach_gl_renderer(OpenGLRenderer* renderer) noexcept;
     [[nodiscard]] std::uint64_t loader_heap_base() const noexcept;
     [[nodiscard]] std::uint64_t loader_heap_size() const noexcept;
     void update_main_thread_context(const CpuState& state);

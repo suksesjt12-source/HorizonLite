@@ -1295,6 +1295,10 @@ int run_headless(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel,
 
 int run_interactive(horizon::Arm64Cpu& cpu, horizon::HorizonKernel& kernel) {
     horizon::SdlDisplay display;
+    kernel.attach_gl_renderer(display.gl_renderer());
+    std::cout << "Graphics backend: "
+              << (display.hardware_renderer_available() ? "SDL OpenGL 3.3 Core" : "SDL 2D fallback")
+              << '\n';
     constexpr auto frame_duration = std::chrono::microseconds(16667);
     bool keep_open = true;
     std::size_t executed_total = 0U;
