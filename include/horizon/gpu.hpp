@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace horizon {
+namespace horizon {\n\nclass OpenGLRenderer;
 
 struct GpuMapping {
     std::uint64_t gpu_va{};
@@ -53,7 +53,7 @@ public:
     [[nodiscard]] std::uint64_t clear_calls() const noexcept;
 private:
     void clear_color();
-    void draw_vertex_array(std::uint32_t first, std::uint32_t count);
+    void draw_vertex_array(std::uint32_t first, std::uint32_t count);\n    void draw_index_array(std::uint32_t first, std::uint32_t count);\n    void update_renderer_state();\n    [[nodiscard]] std::uint64_t upload_bound_texture();
     void rasterize_triangle(const GpuVertex& a, const GpuVertex& b,
                             const GpuVertex& c);
     void write_semaphore();
@@ -86,7 +86,7 @@ public:
     GpuChannel(AddressSpace& memory, GpuAddressSpace& address_space);
     void set_nvmap_fd(std::int32_t fd) noexcept;
     void set_timeout(std::uint32_t timeout) noexcept;
-    void set_priority(std::uint32_t priority) noexcept;
+    void set_priority(std::uint32_t priority) noexcept;\n    void set_renderer(OpenGLRenderer* renderer) noexcept;
     [[nodiscard]] std::uint32_t allocate_object_context(std::uint32_t class_id);
     void allocate_gpfifo(std::uint32_t entries);
     void submit_gpfifo(std::uint64_t guest_entries_address, std::uint32_t entries);
