@@ -61,4 +61,28 @@ int main() {
     assert(channel.engine().triangles() == 1U);
     assert(memory.read_u32(0x100000U + 32U * 64U * 4U + 32U * 4U) != 0U);
     assert(as.translate(rt, 4U) == 0x100000U);
+
+    std::vector<std::uint32_t> modes;
+    modes.push_back((3U << 29U) | (2U << 16U) | 0x0702U);
+    modes.push_back(16U);
+    modes.push_back(28U);
+    modes.push_back((5U << 29U) | (2U << 16U) | 0x0703U);
+    modes.push_back(0x111U);
+    modes.push_back(0x222U);
+    modes.push_back((4U << 29U) | (0x123U << 16U) | 0x0705U);
+    const std::uint64_t modes_guest = 0x121000U;
+    for (std::size_t i = 0; i < modes.size(); ++i)
+        memory.write_u32(modes_guest + i * 4U, modes[i]);
+    const auto modes_va = as.allocate(modes.size() * 4U, 0x1000U);
+    as.map_buffer(4U, modes_va, modes_guest, modes.size() * 4U);
+    memory.write_u64(gpfifo_guest + 8U,
+        modes_va | (static_cast<std::uint64_t>(modes.size()) << 42U));
+    channel.submit_gpfifo(gpfifo_guest, 1U);
+    const auto& regs = channel.engine().registers();
+    assert(regs[0x0702U] == 28U);
+    assert(regs[0x0703U] == 0x111U);
+    assert(regs[0x0704U] == 0x222U);
+    assert(regs[0x0705U] == 0x123U);
+    assert(channel.pusher().methods_processed() == 19U);
+    assert(channel.submissions() == 2U);
 }
