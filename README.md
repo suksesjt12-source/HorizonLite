@@ -253,7 +253,7 @@ The GPU test target submits an actual guest-memory GPFIFO descriptor and pushbuf
 
 Stage 11 adds a hardware-accelerated OpenGL rendering backend while retaining the Stage 10 software path for headless tests and systems where an OpenGL 3.3 context cannot be created.
 
-- SDL requests an OpenGL 3.3 Core Profile context with a 24-bit depth buffer. OpenGL entry points are resolved dynamically through `SDL_GL_GetProcAddress`; no GLAD or GLEW dependency is added. If context creation or function loading fails, the window falls back to the existing SDL 2D renderer.
+- SDL first requests an OpenGL 3.3 Core Profile context with a 24-bit depth buffer, then tries an OpenGL ES 3.0 context. OpenGL entry points are resolved dynamically through `SDL_GL_GetProcAddress`; no GLAD or GLEW dependency is added. The renderer selects desktop GLSL 3.30 or GLSL ES 3.00 and the matching depth-clear entry point. If both context paths fail, the window falls back to the existing SDL 2D renderer.
 - `include/horizon/gl_renderer.hpp` and `src/gl_renderer.cpp` provide GLSL 3.30 shaders, VAO/VBO/EBO submission, an RGBA8 + depth render target FBO, viewport/scissor, depth function/write state, culling, blending, indexed and non-indexed draws, texture upload/cache and FBO-to-window blitting.
 - Interactive startup attaches the SDL GL renderer to `GpuChannel`. Maxwell draw and clear methods target the OpenGL FBO when that context is available. The frame loop presents a pending GPU FBO; otherwise it preserves the existing CPU framebuffer presentation path.
 - Maxwell state decodes the requested viewport/scissor, depth test/function/write, culling and blending registers. The ZETA emulation currently uses the renderer's internal GL_DEPTH_COMPONENT24 attachment.
