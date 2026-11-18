@@ -231,3 +231,19 @@ HorizonLite/
 │   └── thread_atomic_fpu_test.cpp
 └── .github/workflows/build.yml
 ```
+
+
+## Stage 10: GPU command processor foundation
+
+Stage 10 introduces a bounded software HLE for the first Maxwell 3D command path:
+
+- `include/horizon/gpu.hpp` and `src/gpu.cpp` provide a 40-bit GPU virtual address space, nvmap-backed mappings, range allocation/free and guest-memory translation.
+- `/dev/nvhost-as-gpu`, `/dev/nvhost-ctrl-gpu` and `/dev/nvhost-gpu` are recognized by the existing `nvdrv` dispatcher. The HLE exposes address-space allocation/mapping, Tegra X1 profile fields, ZCULL/TPC responses, channel settings, object contexts and GPFIFO submission.
+- `GpuChannel` consumes 64-bit GPFIFO entries, resolves pushbuffer GPU addresses and forwards decoded words to `DmaPusher`.
+- `DmaPusher` decodes Increasing, NonIncreasing, Inline and IncreasingOnce method packets and dispatches method writes to the Maxwell 3D register bank.
+- The initial `0xB197` software engine tracks 4096 registers, clears a linear RGBA8888 target, reads a fixed position/colour vertex stream, rasterizes triangles with barycentric colour interpolation and writes semaphore payloads.
+- Kernel shutdown statistics include GPFIFO submissions, pushbuffer words, method writes, draw calls, triangles and clear operations.
+
+The GPU test target submits an actual guest-memory GPFIFO descriptor and pushbuffer containing Maxwell 3D method packets, then verifies the clear and RGB triangle output.
+
+**ABI and compatibility boundary:** the ioctl identifiers and compact argument layouts in this stage are a documented HorizonLite HLE contract, not a byte-for-byte implementation of every retail `nvhost` ioctl structure. The reported GM20B characteristics are compatibility values, not hardware discovery. The renderer currently supports a narrow linear RGBA8888 target and a fixed float3+float4 vertex stream; it does not implement Tegra GOB/block-linear render targets, shaders, texture sampling, depth/stencil, blending, raster rules, syncpoint timelines, preemption, cache coherency or the full Maxwell method space. The GPFIFO CTest drives the C++ GPU channel directly; it does not yet prove that an arbitrary NRO can initialize this GPU interface or that a triangle is presented through `vi:m`.
