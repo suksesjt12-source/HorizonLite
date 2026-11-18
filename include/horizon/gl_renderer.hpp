@@ -105,6 +105,7 @@ private:
     HORIZON_GL_PROC(void, BlendFunc, (GLenum, GLenum))
     HORIZON_GL_PROC(void, ClearColor, (GLfloat, GLfloat, GLfloat, GLfloat))
     HORIZON_GL_PROC(void, ClearDepth, (GLdouble))
+    HORIZON_GL_PROC(void, ClearDepthf, (GLfloat))
     HORIZON_GL_PROC(void, Clear, (GLbitfield))
 #undef HORIZON_GL_PROC
 
@@ -122,6 +123,7 @@ private:
     GLint sampler_uniform_{-1}, texture_enabled_uniform_{-1}, mvp_uniform_{-1};
     int width_{}, height_{};
     bool pending_gpu_frame_{};
+    bool is_gles_{};
     std::unordered_map<std::uint64_t, GLuint> texture_cache_;
 };
 
