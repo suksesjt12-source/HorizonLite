@@ -91,6 +91,7 @@ public:
     void allocate_gpfifo(std::uint32_t entries);
     void submit_gpfifo(std::uint64_t guest_entries_address, std::uint32_t entries);
     [[nodiscard]] Maxwell3DEngine& engine() noexcept;
+    [[nodiscard]] const Maxwell3DEngine& engine() const noexcept;
     [[nodiscard]] const DmaPusher& pusher() const noexcept;
     [[nodiscard]] std::uint64_t submissions() const noexcept;
 private:
