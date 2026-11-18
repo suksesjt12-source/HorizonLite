@@ -16,6 +16,7 @@ add_executable(horizonlite
     src/audio.cpp
     src/romfs.cpp
     src/display.cpp
+    src/gpu.cpp
 )
 
 target_include_directories(horizonlite PRIVATE include)
@@ -141,3 +142,17 @@ else()
     target_compile_options(horizonlite_loader_config_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME horizonlite_loader_config_test COMMAND horizonlite_loader_config_test)
+
+add_executable(horizonlite_gpu_gpfifo_test
+    tests/gpu_gpfifo_test.cpp
+    src/gpu.cpp
+    src/memory.cpp
+)
+target_include_directories(horizonlite_gpu_gpfifo_test PRIVATE include)
+target_compile_features(horizonlite_gpu_gpfifo_test PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(horizonlite_gpu_gpfifo_test PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(horizonlite_gpu_gpfifo_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME horizonlite_gpu_gpfifo_test COMMAND horizonlite_gpu_gpfifo_test)
