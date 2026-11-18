@@ -1,6 +1,7 @@
 #include "horizon/kernel.hpp"
 #include "horizon/display.hpp"
-#include "horizon/gpu.hpp"\n#include "horizon/gl_renderer.hpp"
+#include "horizon/gpu.hpp"
+#include "horizon/gl_renderer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -433,7 +434,8 @@ std::uint64_t HorizonKernel::loader_heap_base() const noexcept {
 std::uint64_t HorizonKernel::loader_heap_size() const noexcept {
     return heap_capacity_;
 }
-\nvoid HorizonKernel::attach_gl_renderer(OpenGLRenderer* renderer) noexcept {
+
+void HorizonKernel::attach_gl_renderer(OpenGLRenderer* renderer) noexcept {
     gpu_channel_.set_renderer(renderer);
 }
 
