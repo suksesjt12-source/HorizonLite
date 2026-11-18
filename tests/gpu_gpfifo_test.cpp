@@ -12,7 +12,7 @@ static void packet(std::vector<std::uint32_t>& words, std::uint32_t method,
 
 int main() {
     horizon::AddressSpace memory;
-    memory.map_zeroed(0x100000U, 0x30000U,
+    memory.map_zeroed(0x100000U, 0x40000U,
         horizon::Permission::Read | horizon::Permission::Write);
     horizon::GpuAddressSpace as;
     const auto rt = as.allocate(64U * 64U * 4U, 0x1000U);
