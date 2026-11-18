@@ -148,10 +148,19 @@ add_test(NAME horizonlite_loader_config_test COMMAND horizonlite_loader_config_t
 add_executable(horizonlite_gpu_gpfifo_test
     tests/gpu_gpfifo_test.cpp
     src/gpu.cpp
+    src/gl_renderer.cpp
+    src/display.cpp
     src/memory.cpp
 )
 target_include_directories(horizonlite_gpu_gpfifo_test PRIVATE include)
 target_compile_features(horizonlite_gpu_gpfifo_test PRIVATE cxx_std_20)
+if(TARGET SDL2::SDL2)
+    target_link_libraries(horizonlite_gpu_gpfifo_test PRIVATE SDL2::SDL2)
+elseif(TARGET SDL2::SDL2-static)
+    target_link_libraries(horizonlite_gpu_gpfifo_test PRIVATE SDL2::SDL2-static)
+elseif(TARGET PkgConfig::SDL2)
+    target_link_libraries(horizonlite_gpu_gpfifo_test PRIVATE PkgConfig::SDL2)
+endif()
 if(MSVC)
     target_compile_options(horizonlite_gpu_gpfifo_test PRIVATE /W4 /permissive-)
 else()
