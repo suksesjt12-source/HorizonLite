@@ -71,11 +71,12 @@ private:
 
 class DmaPusher {
 public:
-    explicit DmaPusher(Maxwell3DEngine& engine);
+    DmaPusher(AddressSpace& memory, Maxwell3DEngine& engine);
     void push(std::uint64_t guest_address, std::uint32_t word_count);
     [[nodiscard]] std::uint64_t words_processed() const noexcept;
     [[nodiscard]] std::uint64_t methods_processed() const noexcept;
 private:
+    AddressSpace& memory_;
     Maxwell3DEngine& engine_;
     std::uint64_t words_processed_{}, methods_processed_{};
 };
