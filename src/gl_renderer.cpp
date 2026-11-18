@@ -261,7 +261,6 @@ void OpenGLRenderer::configure_vertex_layout() {
 
 void OpenGLRenderer::begin_frame() {
     BindFramebuffer_(GL_FRAMEBUFFER, framebuffer_);
-    Viewport_(0, 0, width_, height_);
 }
 
 void OpenGLRenderer::set_viewport(int x, int y, int width, int height) {
