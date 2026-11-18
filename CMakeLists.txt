@@ -17,6 +17,7 @@ add_executable(horizonlite
     src/romfs.cpp
     src/display.cpp
     src/gpu.cpp
+    src/gl_renderer.cpp
 )
 
 target_include_directories(horizonlite PRIVATE include)
@@ -46,6 +47,7 @@ add_executable(horizonlite_cpu_test
     src/audio.cpp
     src/display.cpp
     src/gpu.cpp
+    src/gl_renderer.cpp
 )
 target_include_directories(horizonlite_cpu_test PRIVATE include)
 target_compile_features(horizonlite_cpu_test PRIVATE cxx_std_20)
@@ -74,6 +76,7 @@ add_executable(horizonlite_thread_atomic_fpu_test
     src/audio.cpp
     src/display.cpp
     src/gpu.cpp
+    src/gl_renderer.cpp
 )
 target_include_directories(horizonlite_thread_atomic_fpu_test PRIVATE include)
 target_compile_features(horizonlite_thread_atomic_fpu_test PRIVATE cxx_std_20)
@@ -109,6 +112,7 @@ endif()
 add_executable(horizonlite_display_gpu_test
     tests/display_gpu_test.cpp
     src/display.cpp
+    src/gl_renderer.cpp
     src/memory.cpp
 )
 target_include_directories(horizonlite_display_gpu_test PRIVATE include)
