@@ -263,6 +263,7 @@ void GpuChannel::submit_gpfifo(std::uint64_t address,std::uint32_t entries) {
     ++submissions_;
 }
 Maxwell3DEngine& GpuChannel::engine() noexcept{return engine_;}
+const Maxwell3DEngine& GpuChannel::engine() const noexcept{return engine_;}
 const DmaPusher& GpuChannel::pusher() const noexcept{return pusher_;}
 std::uint64_t GpuChannel::submissions() const noexcept{return submissions_;}
 
