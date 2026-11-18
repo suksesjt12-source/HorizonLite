@@ -137,9 +137,10 @@ void SdlDisplay::create_software_fallback() {
 }
 
 SdlDisplay::~SdlDisplay() {
+    if (gl_context_ != nullptr)
+        SDL_GL_MakeCurrent(window_, gl_context_);
     gl_renderer_.reset();
     if (gl_context_ != nullptr) {
-        SDL_GL_MakeCurrent(window_, gl_context_);
         SDL_GL_DeleteContext(gl_context_);
         gl_context_ = nullptr;
     }
