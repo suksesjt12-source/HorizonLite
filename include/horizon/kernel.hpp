@@ -3,6 +3,7 @@
 #include "horizon/audio.hpp"
 #include "horizon/cpu.hpp"
 #include "horizon/memory.hpp"
+#include "horizon/gpu.hpp"
 
 #include <array>
 #include <chrono>
@@ -385,6 +386,8 @@ private:
     std::vector<std::weak_ptr<KAudioOut>> audio_sessions_;
     std::unordered_map<std::int32_t, std::string> nv_devices_;
     std::unordered_map<std::uint32_t, NvMapBuffer> nvmap_buffers_;
+    GpuAddressSpace gpu_address_space_;
+    GpuChannel gpu_channel_;
     std::shared_ptr<KDisplayLayer> display_layer_;
     std::shared_ptr<KEvent> applet_event_;
     std::queue<std::uint32_t> applet_messages_;
