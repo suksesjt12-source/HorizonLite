@@ -77,7 +77,7 @@ int main() {
     as.map_buffer(4U, modes_va, modes_guest, modes.size() * 4U);
     memory.write_u64(gpfifo_guest + 8U,
         modes_va | (static_cast<std::uint64_t>(modes.size()) << 42U));
-    channel.submit_gpfifo(gpfifo_guest, 1U);
+    channel.submit_gpfifo(gpfifo_guest + 8U, 1U);
     const auto& regs = channel.engine().registers();
     assert(regs[0x0702U] == 28U);
     assert(regs[0x0703U] == 0x111U);
