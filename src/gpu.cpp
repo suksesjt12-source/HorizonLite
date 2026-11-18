@@ -266,9 +266,17 @@ std::uint64_t Maxwell3DEngine::upload_bound_texture() {
     }
 
     const std::uint32_t bytes_per_pixel = texture_format == 1U ? 2U : 4U;
-    const std::uint64_t source_size =
-        static_cast<std::uint64_t>(texture_width) * texture_height * bytes_per_pixel;
-    if (source_size > 256ULL * 1024ULL * 1024ULL) return 0U;
+    const std::uint64_t linear_row_bytes =
+        static_cast<std::uint64_t>(texture_width) * bytes_per_pixel;
+    const std::uint64_t linear_size = linear_row_bytes * texture_height;
+    const std::uint64_t tiling_height = std::min(block_height, 32U);
+    const std::uint64_t width_gobs = (linear_row_bytes + 63U) / 64U;
+    const std::uint64_t gob_block_rows =
+        (static_cast<std::uint64_t>(texture_height) + 8U * tiling_height - 1U) /
+        (8U * tiling_height);
+    const std::uint64_t tiled_size = width_gobs * tiling_height * gob_block_rows * 512U;
+    const std::uint64_t source_size = block_linear ? tiled_size : linear_size;
+    if (source_size == 0U || source_size > 256ULL * 1024ULL * 1024ULL) return 0U;
     const std::uint64_t texture_guest =
         address_space_.translate(texture_va, source_size);
     const auto source = memory_.view(texture_guest, static_cast<std::size_t>(source_size));
@@ -282,13 +290,8 @@ std::uint64_t Maxwell3DEngine::upload_bound_texture() {
             std::copy(source.begin(), source.end(), rgba.begin());
         }
     } else if (texture_format == 1U) {
-        const std::uint64_t gob_width = 64U;
-        const std::uint64_t gob_height = 8U;
         const std::uint64_t row_bytes = static_cast<std::uint64_t>(texture_width) * 2U;
-        const std::uint64_t width_gobs = (row_bytes + gob_width - 1U) / gob_width;
-        const std::uint64_t bh = block_linear ? std::min(block_height, 32U) : 1U;
-        const std::uint64_t block_rows = (texture_height + gob_height * bh - 1U) /
-                                         (gob_height * bh);
+        const std::uint64_t bh = block_linear ? tiling_height : 1U;
         for (std::uint32_t y = 0U; y < texture_height; ++y) {
             for (std::uint32_t x = 0U; x < texture_width; ++x) {
                 std::uint64_t offset = static_cast<std::uint64_t>(y) * row_bytes +
@@ -321,7 +324,6 @@ std::uint64_t Maxwell3DEngine::upload_bound_texture() {
                 rgba[target + 2U] = b; rgba[target + 3U] = 255U;
             }
         }
-        (void)block_rows;
     } else {
         return 0U;
     }
