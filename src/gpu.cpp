@@ -24,6 +24,22 @@ constexpr std::uint32_t kMethodSemaphoreC = 0x06C2U;
 std::uint8_t channel(float value) {
     return static_cast<std::uint8_t>(std::clamp(value, 0.0F, 1.0F) * 255.0F + 0.5F);
 }
+GpuVertex read_gpu_vertex(AddressSpace& memory, std::uint64_t address,
+                          std::uint32_t stride) {
+    const auto bytes = memory.view(address, 28U);
+    std::array<float, 7> base{};
+    std::memcpy(base.data(), bytes.data(), 28U);
+    GpuVertex vertex{base[0], base[1], base[2], base[3],
+                     base[4], base[5], base[6], 0.0F, 0.0F};
+    if (stride >= 36U) {
+        const auto uv_bytes = memory.view(address + 28U, 8U);
+        std::array<float, 2> uv{};
+        std::memcpy(uv.data(), uv_bytes.data(), 8U);
+        vertex.u = uv[0];
+        vertex.v = uv[1];
+    }
+    return vertex;
+}
 }
 
 std::uint64_t GpuAddressSpace::allocate(std::uint64_t size, std::uint64_t alignment) {
@@ -298,7 +314,7 @@ std::uint64_t Maxwell3DEngine::upload_bound_texture() {
                                        static_cast<std::uint64_t>(x) * 2U;
                 if (block_linear) {
                     const std::uint64_t xb = static_cast<std::uint64_t>(x) * 2U;
-                    const std::uint64_t gob_y = y / (gob_height * bh);
+                    const std::uint64_t gob_y = y / (8U * bh);
                     const std::uint64_t block_y = (y % (gob_height * bh)) / gob_height;
                     const std::uint64_t gob_x = xb / 64U;
                     const std::uint64_t in_x = xb % 64U;
@@ -347,12 +363,8 @@ void Maxwell3DEngine::draw_vertex_array(std::uint32_t first, std::uint32_t count
     gl_vertices.reserve(count);
     for (std::uint32_t i=0;i<count;++i) {
         const auto bytes=memory_.view(guest+static_cast<std::uint64_t>(i)*stride,28U);
-        GpuVertex v{};
-        std::memcpy(&v,bytes.data(),28U);
-        if (stride >= 36U) {
-            const auto uv = memory_.view(guest+static_cast<std::uint64_t>(i)*stride+28U,8U);
-            std::memcpy(&v.u,uv.data(),8U);
-        }
+        GpuVertex v = read_gpu_vertex(memory_,
+            guest + static_cast<std::uint64_t>(i) * stride, stride);
         vertices.push_back(v);
         gl_vertices.push_back(OpenGLVertex{v.x,v.y,v.z,v.r,v.g,v.b,v.a,v.u,v.v});
     }
@@ -403,13 +415,7 @@ void Maxwell3DEngine::draw_index_array(std::uint32_t first, std::uint32_t count)
     gl_vertices.reserve(static_cast<std::size_t>(max_index) + 1U);
     for (std::uint32_t i = 0U; i <= max_index; ++i) {
         const std::uint64_t address = vertex_guest + static_cast<std::uint64_t>(i) * stride;
-        GpuVertex v{};
-        const auto base = memory_.view(address, 28U);
-        std::memcpy(&v, base.data(), 28U);
-        if (stride >= 36U) {
-            const auto uv = memory_.view(address + 28U, 8U);
-            std::memcpy(&v.u, uv.data(), 8U);
-        }
+        GpuVertex v = read_gpu_vertex(memory_, address, stride);
         vertices.push_back(v);
         gl_vertices.push_back(OpenGLVertex{v.x,v.y,v.z,v.r,v.g,v.b,v.a,v.u,v.v});
     }
