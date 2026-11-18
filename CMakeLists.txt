@@ -45,6 +45,7 @@ add_executable(horizonlite_cpu_test
     src/kernel.cpp
     src/audio.cpp
     src/display.cpp
+    src/gpu.cpp
 )
 target_include_directories(horizonlite_cpu_test PRIVATE include)
 target_compile_features(horizonlite_cpu_test PRIVATE cxx_std_20)
@@ -72,6 +73,7 @@ add_executable(horizonlite_thread_atomic_fpu_test
     src/kernel.cpp
     src/audio.cpp
     src/display.cpp
+    src/gpu.cpp
 )
 target_include_directories(horizonlite_thread_atomic_fpu_test PRIVATE include)
 target_compile_features(horizonlite_thread_atomic_fpu_test PRIVATE cxx_std_20)
