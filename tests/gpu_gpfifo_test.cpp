@@ -11,7 +11,6 @@ int main() {
     as.map_buffer(1U,rt,0x100000U,64U*64U*4U);
     const auto vb=as.allocate(3U*28U,0x1000U);
     as.map_buffer(2U,vb,0x110000U,3U*28U);
-    memory.map_zeroed(0x110000U,0x1000U,horizon::Permission::Read|horizon::Permission::Write);
     const std::array<float,21> v{-0.8F,-0.8F,0,1,0,0,1, 0.8F,-0.8F,0,0,1,0,1, 0,0.8F,0,0,0,1,1};
     const auto* raw=reinterpret_cast<const std::uint8_t*>(v.data());
     memory.write(0x110000U,std::vector<std::uint8_t>(raw,raw+sizeof(v)));
